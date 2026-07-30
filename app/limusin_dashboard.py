@@ -856,8 +856,8 @@ st.markdown(f"""
     }}
     .lim-reco-item {{
         background: #ffffff; border: 1px solid #e7e5df; border-left: 3px solid {BRAND_GREEN};
-        border-radius: 10px; padding: 8px 10px; margin-bottom: 8px;
-        font-size: 0.82rem; line-height: 1.35; color: {INK};
+        border-radius: 10px; padding: 12px 14px; margin-bottom: 8px;
+        font-size: 0.85rem; line-height: 1.55; color: {INK};
     }}
     div[data-testid="stChatInput"] textarea {{ background: #fff; }}
     button[data-testid="stBaseButton-secondary"] {{
@@ -1055,9 +1055,13 @@ with col_reco:
 
     st.caption("Basadas en los datos que estás viendo ahora mismo.")
     with st.container(height=VIS_HEIGHT):
-        for reco in generate_recommendations(gran_key, metric_key, selected_keys, reco_angle):
-            reco_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", reco)
-            st.markdown(f'<div class="lim-reco-item">{reco_html}</div>', unsafe_allow_html=True)
+        # Un único análisis fluido (párrafo con las frases seguidas), no
+        # varias tarjetas sueltas — se lee como una sola conclusión, igual
+        # que lo pidió el usuario, en vez de 3 bloques inconexos.
+        frases = generate_recommendations(gran_key, metric_key, selected_keys, reco_angle)
+        analisis = " ".join(frases)
+        analisis_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", analisis)
+        st.markdown(f'<div class="lim-reco-item">{analisis_html}</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ---- Botón para abrir/cerrar Limusin GPT como sidebar lateral.
