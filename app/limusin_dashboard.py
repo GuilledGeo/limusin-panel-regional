@@ -414,159 +414,158 @@ def compute_kpis(gran_key: str = "ccaa", selected_keys: list[str] | None = None)
     }
 
 
+def _con_ccaa(name: str, key: str, gran_key: str) -> str:
+    """Nombre de la región, con su CCAA entre paréntesis si estamos a nivel
+    provincia — relaciona la escala provincia/CCAA en la misma frase."""
+    if gran_key == "provincia":
+        ccaa = PROV_CODE_TO_CCAA.get(key)
+        if ccaa and ccaa != name:  # evita "La Rioja (La Rioja)" en CCAA uniprovinciales
+            return f"{name} ({ccaa})"
+    return name
+
+
+def compute_reco_facts(gran_key: str, selected_keys: list[str], offset: int = 0) -> list[dict]:
+    """Calcula los 3 hechos verificados del panel de Recomendaciones — ver
+    docs/prompt_recomendaciones_panel.md. 100% determinista: la IA (si se
+    usa) solo redacta estos hechos, nunca decide cuál es la peor región ni
+    en qué tramo cae — así no puede repetir el error de versiones
+    anteriores (llamar "problema" a un valor que en realidad es aceptable).
+    `offset` rota qué puesto (2º/3º peor, etc.) se usa en cada bloque, para
+    dar variedad real al refrescar sin tocar los hechos de fondo."""
+    df_p = build_metric_df(gran_key, "paricion", selected_keys)
+    df_p = df_p[df_p["n"] >= 10]
+    df_i = build_metric_df(gran_key, "interparto", selected_keys)
+    df_i = df_i[df_i["n"] >= 10]
+
+    facts = []
+
+    if len(df_i) >= 1:
+        df_i_sorted = df_i.sort_values("valor", ascending=False)  # peor (más días) primero
+        idx1 = offset % len(df_i_sorted)
+        peor1 = df_i_sorted.iloc[idx1]
+        if peor1["valor"] > 450:
+            tramo1 = "candidata_descarte"
+        elif peor1["valor"] > 400:
+            tramo1 = "pierde_productividad"
+        else:
+            tramo1 = "aceptable"
+        facts.append({
+            "tipo": "descarte_manejo", "region": peor1["name"], "key": peor1["key"],
+            "valor": float(peor1["valor"]), "n": int(peor1["n"]),
+            "pct_365": float(peor1["pct_365"]) if "pct_365" in peor1 and pd.notna(peor1["pct_365"]) else None,
+            "tramo": tramo1,
+        })
+        if len(df_i_sorted) >= 2:
+            idx2 = (idx1 + 1) % len(df_i_sorted)
+            if idx2 == idx1:
+                idx2 = (idx1 + 1) % len(df_i_sorted)
+            peor2 = df_i_sorted.iloc[idx2]
+            facts.append({
+                "tipo": "vigilar_manejo", "region": peor2["name"], "key": peor2["key"],
+                "valor": float(peor2["valor"]), "n": int(peor2["n"]),
+                "pct_365": float(peor2["pct_365"]) if "pct_365" in peor2 and pd.notna(peor2["pct_365"]) else None,
+            })
+
+    if len(df_p) >= 2:
+        df_p_sorted = df_p.sort_values("valor", ascending=True)  # peor (más bajo) primero
+        idx3 = offset % len(df_p_sorted)
+        peor_p = df_p_sorted.iloc[idx3]
+        mejor_p = df_p.loc[df_p["valor"].idxmax()]
+        facts.append({
+            "tipo": "revisar_cubricion",
+            "region_peor": peor_p["name"], "key_peor": peor_p["key"],
+            "valor_peor": float(peor_p["valor"]), "n_peor": int(peor_p["n"]),
+            "region_mejor": mejor_p["name"], "key_mejor": mejor_p["key"], "valor_mejor": float(mejor_p["valor"]),
+        })
+
+    return facts[:3]
+
+
+def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
+    """Redacción 100% Python (sin LLM) de los hechos de compute_reco_facts,
+    en el estilo aprobado (ver docs/prompt_recomendaciones_panel.md) —
+    fallback siempre disponible si la IA no responde."""
+    out = []
+    for f in facts:
+        if f["tipo"] == "descarte_manejo":
+            region = _con_ccaa(f["region"], f["key"], gran_key)
+            pct_txt = f" y un {f['pct_365']:.1f}% de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            if f["tramo"] == "candidata_descarte":
+                out.append(
+                    f"Considerar el descarte o revisión de manejo de las vacas en {region}, con un intervalo de "
+                    f"{f['valor']:.0f} días{pct_txt}, ya que supera el umbral de repetidora crónica (más de 450 días)."
+                )
+            elif f["tramo"] == "pierde_productividad":
+                out.append(
+                    f"Vigilar de cerca el manejo reproductivo en {region}, con un intervalo de {f['valor']:.0f} "
+                    f"días{pct_txt}, ya que empieza a perder productividad frente al objetivo de 365 días."
+                )
+            else:
+                out.append(
+                    f"El intervalo entre partos más largo de este conjunto está en {region} ({f['valor']:.0f} "
+                    f"días{pct_txt}), todavía dentro de un rango aceptable, sin alarma de descarte por ahora."
+                )
+        elif f["tipo"] == "vigilar_manejo":
+            region = _con_ccaa(f["region"], f["key"], gran_key)
+            pct_txt = f" y un {f['pct_365']:.1f}% de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            out.append(
+                f"Vigilar el manejo posparto en {region}, que tiene un intervalo de {f['valor']:.0f} días{pct_txt}, "
+                f"lo que sugiere una oportunidad de mejora en nutrición y sanidad para acortar el intervalo entre partos."
+            )
+        elif f["tipo"] == "revisar_cubricion":
+            region_peor = _con_ccaa(f["region_peor"], f["key_peor"], gran_key)
+            region_mejor = _con_ccaa(f["region_mejor"], f["key_mejor"], gran_key)
+            out.append(
+                f"Revisar la estrategia de cubrición y fertilidad en {region_peor}, con un índice de parición del "
+                f"{f['valor_peor']:.1f}%, significativamente más bajo que el {f['valor_mejor']:.1f}% de {region_mejor}, "
+                f"para identificar oportunidades de mejora reproductiva y aumentar la eficiencia del rebaño."
+            )
+    return out
+
+
+def phrase_facts_with_ai(facts: list[dict], gran_key: str, view_context: str) -> list[str] | None:
+    """La IA redacta (no decide) los hechos ya verificados — ver
+    docs/prompt_recomendaciones_panel.md. Devuelve None si no hay clave, si
+    el gate de contención bloquea, o si la llamada falla — la UI cae
+    entonces a render_facts_deterministico()."""
+    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
+        return None
+    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+        return None
+    deterministico = render_facts_deterministico(facts, gran_key)
+    if not deterministico:
+        return None
+    hechos_txt = "\n".join(f"{i+1}. {frase}" for i, frase in enumerate(deterministico))
+    prompt = (
+        "Tienes estas 3 frases YA VERIFICADAS y correctas (no cambies ningún dato, región, cifra ni "
+        "gravedad — están calculadas por reglas de negocio fiables, tu única tarea es mejorar la redacción "
+        "para que suene más natural, variando el estilo entre frases):\n"
+        f"{hechos_txt}\n\n"
+        "Devuelve exactamente 3 frases reescritas, una por línea, con '- ' al principio de cada línea, "
+        "sin numerarlas, sin introducción ni cierre. Cada una debe seguir empezando por el tipo de acción "
+        "(descarte/revisión, vigilar manejo, revisar estrategia) y citar las mismas cifras exactas."
+    )
+    try:
+        answer = call_llm([{"role": "user", "content": prompt}], view_context, temperature=0.4)
+    except Exception:
+        return None
+    if answer.startswith("⚠️") or answer.startswith("⏳"):
+        return None
+    lines = [l.strip(" -•").strip() for l in answer.splitlines() if l.strip(" -•").strip()]
+    return lines[:3] if len(lines) >= 2 else None
+
+
 def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list[str], angle_idx: int = 0) -> list[str]:
-    """2-3 recomendaciones en forma de frase fluida (redacción de consultor,
-    no bullets con emoji) basadas en los datos reales del ámbito activo —
-    deterministas (sin LLM: nunca alucinan, son instantáneas y no dependen
-    de la disponibilidad ni de la cuota de Groq/Anthropic). El ángulo
-    (0/1/2) varía el enfoque para que el botón de refrescar dé variedad
-    real sin necesitar una llamada a la IA."""
-    cfg = METRIC_META[metric_key]
-    df = build_metric_df(gran_key, metric_key, selected_keys)
-    df = df[df["n"] >= 10]  # descarta muestras demasiado pequeñas para recomendar sobre ellas
-    if len(df) < 2:
+    """3 recomendaciones independientes (descarte/manejo, vigilancia,
+    estrategia de cubrición), cada una sobre una región distinta cuando los
+    datos lo permiten — combina parición e interpartos sin depender de cuál
+    esté seleccionada en "Análisis". 100% determinista (ver
+    compute_reco_facts/render_facts_deterministico); el llamador puede
+    intentar antes phrase_facts_with_ai() sobre los mismos hechos."""
+    facts = compute_reco_facts(gran_key, selected_keys, offset=angle_idx)
+    if not facts:
         return ["No hay suficientes regiones con muestra fiable en este filtro para generar recomendaciones."]
-
-    if cfg["higher_is_better"]:
-        worst, best = df.loc[df["valor"].idxmin()], df.loc[df["valor"].idxmax()]
-    else:
-        worst, best = df.loc[df["valor"].idxmax()], df.loc[df["valor"].idxmin()]
-    unit = GRANULARITIES[gran_key]["unit_label"]
-    es_paricion = metric_key == "paricion"
-    fmt = (lambda v: f"{v:.1f}%") if es_paricion else (lambda v: f"{v:.0f} días")
-    # "un 74,5%" tiene sentido en español, pero "un 384 días" no — para
-    # interpartos hace falta el sustantivo ("un intervalo de 384 días").
-    frase_valor = (lambda v: f"un {fmt(v)}") if es_paricion else (lambda v: f"un intervalo de {fmt(v)}")
-
-    def gap_fmt(v: float) -> str:
-        if es_paricion:
-            return f"{v:.1f} puntos"
-        dias = round(v)
-        return f"{dias} día" if dias == 1 else f"{dias} días"
-
-    def con_ccaa(row) -> str:
-        """Nombre de la región, con su CCAA entre paréntesis si estamos a
-        nivel provincia — para relacionar la escala provincia/CCAA en la
-        misma frase, no solo el nombre suelto."""
-        if gran_key == "provincia":
-            ccaa = PROV_CODE_TO_CCAA.get(row["key"])
-            if ccaa and ccaa != row["name"]:  # evita "La Rioja (La Rioja)" en CCAA uniprovinciales
-                return f"{row['name']} ({ccaa})"
-        return row["name"]
-
-    def otro_analisis(row, contexto: str = "peor") -> str | None:
-        """Cruza el otro análisis (parición <-> interpartos) para la misma
-        región — diagnóstico conjunto en vez de mirar un solo KPI suelto.
-        contexto="peor" (diagnóstico de un problema) o "mejor" (¿el liderazgo
-        se sostiene en todo el ciclo o es solo en este KPI?)."""
-        other_key = "interparto" if es_paricion else "paricion"
-        other_data = GRANULARITIES[gran_key]["data"][other_key].get(row["key"])
-        if not other_data:
-            return None
-        other_cfg = METRIC_META[other_key]
-        other_fmt = (lambda v: f"{v:.1f}%") if other_key == "paricion" else (lambda v: f"{v:.0f} días")
-        other_val = other_data["valor"]
-        also_bad = other_val < 60 if other_key == "paricion" else other_val > 400
-        also_good = other_val >= 70 if other_key == "paricion" else other_val <= 395
-
-        if contexto == "peor":
-            if also_bad:
-                return (
-                    f"El problema no parece limitarse a {cfg['label'].lower()}: su {other_cfg['label'].lower()} "
-                    f"también es preocupante ({other_fmt(other_val)}), señal de que la fertilidad y la reconcepción "
-                    f"posparto fallan a la vez, no un único eslabón del proceso."
-                )
-            return (
-                f"En cambio, su {other_cfg['label'].lower()} ({other_fmt(other_val)}) está dentro de rango razonable, "
-                f"así que el problema parece limitarse a este KPI concreto y no a todo el ciclo reproductivo."
-            )
-        else:  # contexto == "mejor"
-            if also_good:
-                return (
-                    f"Su buen resultado no se limita a {cfg['label'].lower()}: el {other_cfg['label'].lower()} "
-                    f"({other_fmt(other_val)}) también acompaña, señal de que el manejo funciona bien en todo el "
-                    f"ciclo reproductivo, no solo en este KPI."
-                )
-            return (
-                f"Sin embargo, su {other_cfg['label'].lower()} ({other_fmt(other_val)}) no acompaña al mismo nivel, "
-                f"así que el liderazgo se apoya en un único KPI, no en todo el ciclo reproductivo."
-            )
-
-    angle = angle_idx % 3
-    recos = []
-
-    if angle == 0:
-        # Peor región + diagnóstico + margen con la mejor, en una sola frase.
-        gap = abs(best["valor"] - worst["valor"])
-        if es_paricion:
-            recos.append(
-                f"La región de {con_ccaa(worst)}, con un índice de parición del {fmt(worst['valor'])}, requiere "
-                f"intervención urgente para mejorar su fertilidad y cubrición inicial, ya que se encuentra "
-                f"{gap_fmt(gap)} por debajo del líder {con_ccaa(best)}, que tiene un índice de parición del {fmt(best['valor'])}."
-            )
-        else:
-            recos.append(
-                f"La región de {con_ccaa(worst)}, con un intervalo entre partos de {fmt(worst['valor'])}, debería "
-                f"revisar la reconcepción posparto de sus vacas (nutrición, sanidad), ya que supera en "
-                f"{gap_fmt(gap)} al líder {con_ccaa(best)}, que registra un intervalo de {fmt(best['valor'])}."
-            )
-        cruce = otro_analisis(worst)
-        if cruce:
-            recos.append(cruce)
-        umbral = 60 if es_paricion else 420
-        alarm = df[df["valor"] < umbral] if es_paricion else df[df["valor"] > umbral]
-        if len(alarm):
-            names = ", ".join(alarm.sort_values("valor", ascending=es_paricion)["name"].head(3))
-            cond = f"por debajo del {umbral}% de parición" if es_paricion else f"por encima de los {umbral} días de intervalo"
-            recos.append(f"Actualmente hay {len(alarm)} {unit}(s) {cond} ({names}), lo que apunta a un problema extendido, no aislado en una sola región.")
-        else:
-            cond = f"del {umbral}% de parición" if es_paricion else f"de los {umbral} días de intervalo"
-            recos.append(f"Ninguna región de este conjunto está por {'debajo' if es_paricion else 'encima'} {cond}, así que no hay una alarma grave y generalizada por este KPI.")
-
-    elif angle == 1:
-        # Quién lidera, qué tan cerca está el segundo puesto, y si lo es también en el otro análisis.
-        df_by_best = df.sort_values("valor", ascending=not cfg["higher_is_better"])
-        second = df_by_best.iloc[1]
-        gap2 = abs(best["valor"] - second["valor"])
-        recos.append(
-            f"{con_ccaa(best)} lidera con {frase_valor(best['valor'])} (n={int(best['n'])}), lo que la convierte en "
-            f"referencia para entender qué se está haciendo mejor en manejo, cubrición o nutrición."
-        )
-        recos.append(
-            f"Le sigue {con_ccaa(second)}, con {frase_valor(second['valor'])} — solo {gap_fmt(gap2)} de diferencia — lo que "
-            f"sugiere que el buen resultado de {best['name']} no es un caso aislado, sino un patrón que se repite en la zona."
-        )
-        cruce = otro_analisis(best, contexto="mejor")
-        if cruce:
-            recos.append(cruce)
-        else:
-            reliability = "una muestra amplia, dato fiable para tomarlo como benchmark del sector" if best["n"] >= 500 else "una muestra moderada, conviene contrastarlo antes de generalizarlo"
-            recos.append(f"Con n={int(best['n'])} hembras analizadas en {best['name']}, se trata de {reliability}.")
-
-    else:
-        # Patrones de fiabilidad: tamaño de muestra vs. resultado, y valor típico del conjunto.
-        corr = df["n"].corr(df["valor"])
-        # El signo de "corr" es sobre el valor crudo; para interpartos un valor
-        # más alto es PEOR (higher_is_better=False), así que hay que invertir
-        # el signo antes de hablar de "rendir mejor/peor" en términos de negocio.
-        corr_hacia_mejor = corr if cfg["higher_is_better"] else -corr
-        if corr_hacia_mejor is not None and corr_hacia_mejor > 0.2:
-            lectura = "positiva: las regiones con más nodrizas analizadas tienden a rendir mejor, probablemente porque son explotaciones más consolidadas"
-        elif corr_hacia_mejor is not None and corr_hacia_mejor < -0.2:
-            lectura = "negativa: las regiones con más nodrizas analizadas tienden a rendir peor, señal de que el tamaño no garantiza mejor manejo"
-        else:
-            lectura = "prácticamente nula: el tamaño de la ganadería no explica por sí solo el resultado, hay que mirar el manejo caso a caso"
-        recos.append(f"La correlación entre el tamaño de muestra y {cfg['label'].lower()} es de {corr:.2f} — {lectura}.")
-        small = df[df["n"] < 100]
-        if len(small):
-            names = ", ".join(small.sort_values("n")["name"].head(3))
-            recos.append(f"{len(small)} {unit}(s) tienen una muestra reducida (menos de 100): {names} — sus cifras deben tomarse con cautela antes de sacar conclusiones firmes.")
-        else:
-            recos.append(f"Todas las regiones de este conjunto tienen una muestra de al menos 100 — los datos son razonablemente sólidos para comparar entre sí.")
-        mid = df["valor"].median()
-        recos.append(f"El valor típico del conjunto se sitúa en torno al {fmt(mid)}, con {con_ccaa(best)} y {con_ccaa(worst)} marcando los dos extremos.")
-
-    return recos[:3]
+    return render_facts_deterministico(facts, gran_key)
 
 
 # ---------------------------------------------------------------- IA conversacional ("Limusin GPT")
@@ -1055,9 +1054,20 @@ with col_reco:
 
     st.caption("Basadas en los datos que estás viendo ahora mismo.")
     with st.container(height=VIS_HEIGHT):
-        # 3 bloques independientes, cada uno su propia tarjeta — no un único
-        # párrafo largo fusionado.
-        for reco in generate_recommendations(gran_key, metric_key, selected_keys, reco_angle):
+        # 3 bloques independientes, cada uno su propia tarjeta, sobre una
+        # región distinta — los hechos los calcula compute_reco_facts()
+        # (determinista, ver docs/prompt_recomendaciones_panel.md).
+        # phrase_facts_with_ai() existe pero NO se usa aquí: en pruebas
+        # reales, incluso con instrucciones estrictas de "no cambiar
+        # hechos", el modelo pequeño reformulaba el matiz de forma confusa
+        # (p.ej. convertía "sin alarma de descarte" en una frase que sonaba
+        # a lo contrario) — demasiado riesgo para un panel de recomendaciones
+        # de negocio. La redacción determinista ya iguala el estilo pedido.
+        facts = compute_reco_facts(gran_key, selected_keys, offset=reco_angle)
+        frases = render_facts_deterministico(facts, gran_key)
+        if not frases:
+            frases = ["No hay suficientes regiones con muestra fiable en este filtro para generar recomendaciones."]
+        for reco in frases:
             reco_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", reco)
             st.markdown(f'<div class="lim-reco-item">{reco_html}</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
