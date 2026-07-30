@@ -411,11 +411,12 @@ def compute_kpis(gran_key: str = "ccaa", selected_keys: list[str] | None = None)
 
 
 def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list[str], angle_idx: int = 0) -> list[str]:
-    """2-3 recomendaciones cortas basadas en los datos reales del ámbito
-    activo — deterministas (sin LLM: nunca alucinan, son instantáneas y no
-    dependen de la disponibilidad ni de la cuota de Groq/Anthropic). El
-    ángulo (0/1/2) varía el enfoque para que el botón de refrescar dé
-    variedad real sin necesitar una llamada a la IA."""
+    """2-3 recomendaciones en forma de frase fluida (redacción de consultor,
+    no bullets con emoji) basadas en los datos reales del ámbito activo —
+    deterministas (sin LLM: nunca alucinan, son instantáneas y no dependen
+    de la disponibilidad ni de la cuota de Groq/Anthropic). El ángulo
+    (0/1/2) varía el enfoque para que el botón de refrescar dé variedad
+    real sin necesitar una llamada a la IA."""
     cfg = METRIC_META[metric_key]
     df = build_metric_df(gran_key, metric_key, selected_keys)
     df = df[df["n"] >= 10]  # descarta muestras demasiado pequeñas para recomendar sobre ellas
@@ -427,68 +428,86 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
     else:
         worst, best = df.loc[df["valor"].idxmax()], df.loc[df["valor"].idxmin()]
     unit = GRANULARITIES[gran_key]["unit_label"]
-    unidad_txt = "%" if metric_key == "paricion" else " días"
-    fmt = (lambda v: f"{v:.1f}%") if metric_key == "paricion" else (lambda v: f"{v:.0f} días")
+    es_paricion = metric_key == "paricion"
+    fmt = (lambda v: f"{v:.1f}%") if es_paricion else (lambda v: f"{v:.0f} días")
+    # "un 74,5%" tiene sentido en español, pero "un 384 días" no — para
+    # interpartos hace falta el sustantivo ("un intervalo de 384 días").
+    frase_valor = (lambda v: f"un {fmt(v)}") if es_paricion else (lambda v: f"un intervalo de {fmt(v)}")
+
+    def gap_fmt(v: float) -> str:
+        if es_paricion:
+            return f"{v:.1f} puntos"
+        dias = round(v)
+        return f"{dias} día" if dias == 1 else f"{dias} días"
 
     angle = angle_idx % 3
     recos = []
 
     if angle == 0:
-        # Ángulo 1 (por defecto): peor región + margen con la mejor + alerta de umbral.
-        if metric_key == "paricion":
+        # Peor región + diagnóstico + margen con la mejor, en una sola frase.
+        gap = abs(best["valor"] - worst["valor"])
+        if es_paricion:
             recos.append(
-                f"🔻 **{worst['name']}** tiene el índice de parición más bajo ({worst['valor']:.1f}%, "
-                f"n={int(worst['n'])}) — señal de fertilidad/cubrición, no de destete."
-            )
-            gap = abs(best["valor"] - worst["valor"])
-            recos.append(f"📊 **{gap:.1f} puntos** de diferencia con {best['name']} ({best['valor']:.1f}%) — margen real sin coste extra de mantenimiento.")
-            low = df[df["valor"] < 60]
-            recos.append(
-                f"⚠️ {len(low)} {unit}(s) por debajo del 60% de parición ({', '.join(low.sort_values('valor')['name'].head(3))})."
-                if len(low) else "✅ Ninguna región baja del 60% de parición en este conjunto — sin alarma grave de fertilidad."
+                f"La región de {worst['name']}, con un índice de parición del {fmt(worst['valor'])}, requiere "
+                f"intervención urgente para mejorar su fertilidad y cubrición inicial, ya que se encuentra "
+                f"{gap_fmt(gap)} por debajo del líder {best['name']}, que tiene un índice de parición del {fmt(best['valor'])}."
             )
         else:
             recos.append(
-                f"🔻 **{worst['name']}** tiene el intervalo más largo ({worst['valor']:.0f} días, "
-                f"n={int(worst['n'])}) — >400d ya pierde terneros de por vida; revisar reconcepción posparto."
+                f"La región de {worst['name']}, con un intervalo entre partos de {fmt(worst['valor'])}, debería "
+                f"revisar la reconcepción posparto de sus vacas (nutrición, sanidad), ya que supera en "
+                f"{gap_fmt(gap)} al líder {best['name']}, que registra un intervalo de {fmt(best['valor'])}."
             )
-            gap = abs(best["valor"] - worst["valor"])
-            recos.append(f"📊 **{gap:.0f} días** de diferencia con {best['name']} ({best['valor']:.0f}d) — cerrarla es más partos por vaca a igual coste anual.")
-            alarm = df[df["valor"] > 420]
-            recos.append(
-                f"⚠️ {len(alarm)} {unit}(s) por encima de 420 días ({', '.join(alarm.sort_values('valor', ascending=False)['name'].head(3))}) — revisar candidatas a descarte."
-                if len(alarm) else "✅ Ninguna región supera los 420 días — sin señal de descarte urgente por este KPI."
-            )
+        umbral = 60 if es_paricion else 420
+        alarm = df[df["valor"] < umbral] if es_paricion else df[df["valor"] > umbral]
+        if len(alarm):
+            names = ", ".join(alarm.sort_values("valor", ascending=es_paricion)["name"].head(3))
+            cond = f"por debajo del {umbral}% de parición" if es_paricion else f"por encima de los {umbral} días de intervalo"
+            recos.append(f"Actualmente hay {len(alarm)} {unit}(s) {cond} ({names}), lo que apunta a un problema extendido, no aislado en una sola región.")
+        else:
+            cond = f"del {umbral}% de parición" if es_paricion else f"de los {umbral} días de intervalo"
+            recos.append(f"Ninguna región de este conjunto está por {'debajo' if es_paricion else 'encima'} {cond}, así que no hay una alarma grave y generalizada por este KPI.")
+        reliability = "una base de datos sólida" if worst["n"] >= 300 else "una muestra más limitada, a contrastar antes de actuar con contundencia"
+        recos.append(f"Con n={int(worst['n'])} en {worst['name']}, el dato se apoya en {reliability}.")
 
     elif angle == 1:
-        # Ángulo 2: qué funciona bien (líder + segundo) y si es una referencia fiable.
+        # Quién lidera, qué tan cerca está el segundo puesto, y si es una referencia fiable.
         df_by_best = df.sort_values("valor", ascending=not cfg["higher_is_better"])
         second = df_by_best.iloc[1]
-        recos.append(
-            f"🏆 **{best['name']}** lidera con {fmt(best['valor'])} (n={int(best['n'])}) — referencia a estudiar: "
-            "qué maneja distinto en cubrición/nutrición respecto al resto."
-        )
         gap2 = abs(best["valor"] - second["valor"])
-        recos.append(f"📊 Solo **{gap2:.1f}{unidad_txt}** la separan de **{second['name']}** ({fmt(second['valor'])}) — el segundo puesto está cerca, no es un caso aislado.")
-        reliability = "muestra grande, dato fiable" if best["n"] >= 500 else "muestra moderada, contrastar antes de generalizar"
-        recos.append(f"🔎 Con n={int(best['n'])} en {best['name']}, es {reliability} para tomarla como referencia del sector.")
+        recos.append(
+            f"{best['name']} lidera con {frase_valor(best['valor'])} (n={int(best['n'])}), lo que la convierte en "
+            f"referencia para entender qué se está haciendo mejor en manejo, cubrición o nutrición."
+        )
+        recos.append(
+            f"Le sigue {second['name']}, con {frase_valor(second['valor'])} — solo {gap_fmt(gap2)} de diferencia — lo que "
+            f"sugiere que el buen resultado de {best['name']} no es un caso aislado, sino un patrón que se repite en la zona."
+        )
+        reliability = "una muestra amplia, dato fiable para tomarlo como benchmark del sector" if best["n"] >= 500 else "una muestra moderada, conviene contrastarlo antes de generalizarlo"
+        recos.append(f"Con n={int(best['n'])} hembras analizadas en {best['name']}, se trata de {reliability}.")
 
     else:
-        # Ángulo 3: patrones de fiabilidad — tamaño de muestra vs. resultado.
+        # Patrones de fiabilidad: tamaño de muestra vs. resultado, y valor típico del conjunto.
         corr = df["n"].corr(df["valor"])
-        corr_txt = "positiva" if corr and corr > 0.2 else ("negativa" if corr and corr < -0.2 else "prácticamente nula")
-        recos.append(
-            f"🔎 Correlación entre tamaño de muestra y {cfg['label'].lower()}: **{corr:.2f}** ({corr_txt}) — "
-            + ("las regiones más consolidadas tienden a rendir distinto del resto." if corr_txt != "prácticamente nula"
-               else "el tamaño de la ganadería no explica por sí solo el resultado, hay que mirar manejo.")
-        )
+        # El signo de "corr" es sobre el valor crudo; para interpartos un valor
+        # más alto es PEOR (higher_is_better=False), así que hay que invertir
+        # el signo antes de hablar de "rendir mejor/peor" en términos de negocio.
+        corr_hacia_mejor = corr if cfg["higher_is_better"] else -corr
+        if corr_hacia_mejor is not None and corr_hacia_mejor > 0.2:
+            lectura = "positiva: las regiones con más nodrizas analizadas tienden a rendir mejor, probablemente porque son explotaciones más consolidadas"
+        elif corr_hacia_mejor is not None and corr_hacia_mejor < -0.2:
+            lectura = "negativa: las regiones con más nodrizas analizadas tienden a rendir peor, señal de que el tamaño no garantiza mejor manejo"
+        else:
+            lectura = "prácticamente nula: el tamaño de la ganadería no explica por sí solo el resultado, hay que mirar el manejo caso a caso"
+        recos.append(f"La correlación entre el tamaño de muestra y {cfg['label'].lower()} es de {corr:.2f} — {lectura}.")
         small = df[df["n"] < 100]
-        recos.append(
-            f"⚠️ {len(small)} {unit}(s) con muestra pequeña (&lt;100): {', '.join(small.sort_values('n')['name'].head(3))} — tomar sus cifras con cautela."
-            if len(small) else "✅ Todas las regiones de este conjunto tienen muestra ≥100 — datos razonablemente sólidos."
-        )
+        if len(small):
+            names = ", ".join(small.sort_values("n")["name"].head(3))
+            recos.append(f"{len(small)} {unit}(s) tienen una muestra reducida (menos de 100): {names} — sus cifras deben tomarse con cautela antes de sacar conclusiones firmes.")
+        else:
+            recos.append(f"Todas las regiones de este conjunto tienen una muestra de al menos 100 — los datos son razonablemente sólidos para comparar entre sí.")
         mid = df["valor"].median()
-        recos.append(f"📐 Mediana del conjunto: **{fmt(mid)}** — {best['name']} y {worst['name']} son los extremos, el resto se mueve alrededor de ese valor típico.")
+        recos.append(f"El valor típico del conjunto se sitúa en torno al {fmt(mid)}, con {best['name']} y {worst['name']} marcando los dos extremos.")
 
     return recos[:3]
 
