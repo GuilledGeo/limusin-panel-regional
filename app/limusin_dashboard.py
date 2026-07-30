@@ -181,6 +181,10 @@ CCAA_TO_PROV_CODES = {
     "C. Valenciana": ["12"],
 }
 
+# Inverso de CCAA_TO_PROV_CODES — para poder decir "esta provincia pertenece
+# a esta CCAA" en las recomendaciones cuando se está a nivel provincia.
+PROV_CODE_TO_CCAA = {code: ccaa for ccaa, codes in CCAA_TO_PROV_CODES.items() for code in codes}
+
 METRIC_META = {
     "paricion": {
         "label": "Índice de parición",
@@ -440,6 +444,54 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
         dias = round(v)
         return f"{dias} día" if dias == 1 else f"{dias} días"
 
+    def con_ccaa(row) -> str:
+        """Nombre de la región, con su CCAA entre paréntesis si estamos a
+        nivel provincia — para relacionar la escala provincia/CCAA en la
+        misma frase, no solo el nombre suelto."""
+        if gran_key == "provincia":
+            ccaa = PROV_CODE_TO_CCAA.get(row["key"])
+            if ccaa and ccaa != row["name"]:  # evita "La Rioja (La Rioja)" en CCAA uniprovinciales
+                return f"{row['name']} ({ccaa})"
+        return row["name"]
+
+    def otro_analisis(row, contexto: str = "peor") -> str | None:
+        """Cruza el otro análisis (parición <-> interpartos) para la misma
+        región — diagnóstico conjunto en vez de mirar un solo KPI suelto.
+        contexto="peor" (diagnóstico de un problema) o "mejor" (¿el liderazgo
+        se sostiene en todo el ciclo o es solo en este KPI?)."""
+        other_key = "interparto" if es_paricion else "paricion"
+        other_data = GRANULARITIES[gran_key]["data"][other_key].get(row["key"])
+        if not other_data:
+            return None
+        other_cfg = METRIC_META[other_key]
+        other_fmt = (lambda v: f"{v:.1f}%") if other_key == "paricion" else (lambda v: f"{v:.0f} días")
+        other_val = other_data["valor"]
+        also_bad = other_val < 60 if other_key == "paricion" else other_val > 400
+        also_good = other_val >= 70 if other_key == "paricion" else other_val <= 395
+
+        if contexto == "peor":
+            if also_bad:
+                return (
+                    f"El problema no parece limitarse a {cfg['label'].lower()}: su {other_cfg['label'].lower()} "
+                    f"también es preocupante ({other_fmt(other_val)}), señal de que la fertilidad y la reconcepción "
+                    f"posparto fallan a la vez, no un único eslabón del proceso."
+                )
+            return (
+                f"En cambio, su {other_cfg['label'].lower()} ({other_fmt(other_val)}) está dentro de rango razonable, "
+                f"así que el problema parece limitarse a este KPI concreto y no a todo el ciclo reproductivo."
+            )
+        else:  # contexto == "mejor"
+            if also_good:
+                return (
+                    f"Su buen resultado no se limita a {cfg['label'].lower()}: el {other_cfg['label'].lower()} "
+                    f"({other_fmt(other_val)}) también acompaña, señal de que el manejo funciona bien en todo el "
+                    f"ciclo reproductivo, no solo en este KPI."
+                )
+            return (
+                f"Sin embargo, su {other_cfg['label'].lower()} ({other_fmt(other_val)}) no acompaña al mismo nivel, "
+                f"así que el liderazgo se apoya en un único KPI, no en todo el ciclo reproductivo."
+            )
+
     angle = angle_idx % 3
     recos = []
 
@@ -448,16 +500,19 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
         gap = abs(best["valor"] - worst["valor"])
         if es_paricion:
             recos.append(
-                f"La región de {worst['name']}, con un índice de parición del {fmt(worst['valor'])}, requiere "
+                f"La región de {con_ccaa(worst)}, con un índice de parición del {fmt(worst['valor'])}, requiere "
                 f"intervención urgente para mejorar su fertilidad y cubrición inicial, ya que se encuentra "
-                f"{gap_fmt(gap)} por debajo del líder {best['name']}, que tiene un índice de parición del {fmt(best['valor'])}."
+                f"{gap_fmt(gap)} por debajo del líder {con_ccaa(best)}, que tiene un índice de parición del {fmt(best['valor'])}."
             )
         else:
             recos.append(
-                f"La región de {worst['name']}, con un intervalo entre partos de {fmt(worst['valor'])}, debería "
+                f"La región de {con_ccaa(worst)}, con un intervalo entre partos de {fmt(worst['valor'])}, debería "
                 f"revisar la reconcepción posparto de sus vacas (nutrición, sanidad), ya que supera en "
-                f"{gap_fmt(gap)} al líder {best['name']}, que registra un intervalo de {fmt(best['valor'])}."
+                f"{gap_fmt(gap)} al líder {con_ccaa(best)}, que registra un intervalo de {fmt(best['valor'])}."
             )
+        cruce = otro_analisis(worst)
+        if cruce:
+            recos.append(cruce)
         umbral = 60 if es_paricion else 420
         alarm = df[df["valor"] < umbral] if es_paricion else df[df["valor"] > umbral]
         if len(alarm):
@@ -467,24 +522,26 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
         else:
             cond = f"del {umbral}% de parición" if es_paricion else f"de los {umbral} días de intervalo"
             recos.append(f"Ninguna región de este conjunto está por {'debajo' if es_paricion else 'encima'} {cond}, así que no hay una alarma grave y generalizada por este KPI.")
-        reliability = "una base de datos sólida" if worst["n"] >= 300 else "una muestra más limitada, a contrastar antes de actuar con contundencia"
-        recos.append(f"Con n={int(worst['n'])} en {worst['name']}, el dato se apoya en {reliability}.")
 
     elif angle == 1:
-        # Quién lidera, qué tan cerca está el segundo puesto, y si es una referencia fiable.
+        # Quién lidera, qué tan cerca está el segundo puesto, y si lo es también en el otro análisis.
         df_by_best = df.sort_values("valor", ascending=not cfg["higher_is_better"])
         second = df_by_best.iloc[1]
         gap2 = abs(best["valor"] - second["valor"])
         recos.append(
-            f"{best['name']} lidera con {frase_valor(best['valor'])} (n={int(best['n'])}), lo que la convierte en "
+            f"{con_ccaa(best)} lidera con {frase_valor(best['valor'])} (n={int(best['n'])}), lo que la convierte en "
             f"referencia para entender qué se está haciendo mejor en manejo, cubrición o nutrición."
         )
         recos.append(
-            f"Le sigue {second['name']}, con {frase_valor(second['valor'])} — solo {gap_fmt(gap2)} de diferencia — lo que "
+            f"Le sigue {con_ccaa(second)}, con {frase_valor(second['valor'])} — solo {gap_fmt(gap2)} de diferencia — lo que "
             f"sugiere que el buen resultado de {best['name']} no es un caso aislado, sino un patrón que se repite en la zona."
         )
-        reliability = "una muestra amplia, dato fiable para tomarlo como benchmark del sector" if best["n"] >= 500 else "una muestra moderada, conviene contrastarlo antes de generalizarlo"
-        recos.append(f"Con n={int(best['n'])} hembras analizadas en {best['name']}, se trata de {reliability}.")
+        cruce = otro_analisis(best, contexto="mejor")
+        if cruce:
+            recos.append(cruce)
+        else:
+            reliability = "una muestra amplia, dato fiable para tomarlo como benchmark del sector" if best["n"] >= 500 else "una muestra moderada, conviene contrastarlo antes de generalizarlo"
+            recos.append(f"Con n={int(best['n'])} hembras analizadas en {best['name']}, se trata de {reliability}.")
 
     else:
         # Patrones de fiabilidad: tamaño de muestra vs. resultado, y valor típico del conjunto.
@@ -507,7 +564,7 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
         else:
             recos.append(f"Todas las regiones de este conjunto tienen una muestra de al menos 100 — los datos son razonablemente sólidos para comparar entre sí.")
         mid = df["valor"].median()
-        recos.append(f"El valor típico del conjunto se sitúa en torno al {fmt(mid)}, con {best['name']} y {worst['name']} marcando los dos extremos.")
+        recos.append(f"El valor típico del conjunto se sitúa en torno al {fmt(mid)}, con {con_ccaa(best)} y {con_ccaa(worst)} marcando los dos extremos.")
 
     return recos[:3]
 
