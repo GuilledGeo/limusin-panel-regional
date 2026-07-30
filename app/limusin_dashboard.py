@@ -1125,11 +1125,19 @@ cfg = METRIC_META[metric_key]
 # (VIS_HEIGHT), sin contenedores de altura fija anidados (eso causaba scroll
 # con hueco en blanco) — cada elemento define su propia altura y ya salen
 # igualados. La columna del mapa/ranking predomina en anchura.
+def _toggle_gpt_open():
+    # Callback de on_click en vez del patrón manual "if button: set + rerun()"
+    # — el callback se ejecuta y actualiza session_state ANTES de que
+    # Streamlit decida el layout de la siguiente pasada, evitando el efecto
+    # de quedarse "colado" que puede darse con el rerun manual.
+    st.session_state["gpt_open"] = not st.session_state.get("gpt_open", True)
+
+
 gpt_open = st.session_state.get("gpt_open", True)
 if gpt_open:
-    col_main, col_reco, col_toggle, col_gpt = st.columns([3.3, 1, 0.14, 1.3], gap="small")
+    col_main, col_reco, col_toggle, col_gpt = st.columns([3.3, 1, 0.2, 1.3], gap="small")
 else:
-    col_main, col_reco, col_toggle = st.columns([3.3, 1, 0.14], gap="small")
+    col_main, col_reco, col_toggle = st.columns([3.3, 1, 0.2], gap="small")
     col_gpt = None
 
 with col_main:
@@ -1214,9 +1222,10 @@ with col_reco:
 with col_toggle:
     st.write("")
     st.write("")
-    if st.button("◂" if gpt_open else "💬", key="toggle_gpt", help="Mostrar/ocultar Limusin GPT", use_container_width=True):
-        st.session_state["gpt_open"] = not gpt_open
-        st.rerun()
+    st.button(
+        "◂" if gpt_open else "💬", key="toggle_gpt", help="Mostrar/ocultar Limusin GPT",
+        use_container_width=True, on_click=_toggle_gpt_open,
+    )
 
 # Clic en una CCAA del mapa (solo tiene sentido en nivel CCAA, sin filtro
 # activo) -> equivale a seleccionarla a mano en "Filtrar por Comunidad
