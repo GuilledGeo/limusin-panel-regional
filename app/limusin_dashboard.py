@@ -11,6 +11,7 @@ Lanzar con: streamlit run app/limusin_dashboard.py
 """
 import json
 import os
+import re
 import sys
 import urllib.request
 
@@ -611,7 +612,7 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
 """
 
 
-def call_llm(messages: list, view_context: str = "", filtered_table: str = "") -> str:
+def call_llm(messages: list, view_context: str = "", filtered_table: str = "", temperature: float = 0.2) -> str:
     system_prompt = build_context(view_context, filtered_table)
     if AI_PROVIDER == "groq":
         if not GROQ_API_KEY:
@@ -619,7 +620,7 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "") -
         from groq import Groq
         client = Groq(api_key=GROQ_API_KEY)
         completion = client.chat.completions.create(
-            model=GROQ_MODEL, max_tokens=350, temperature=0.2,
+            model=GROQ_MODEL, max_tokens=350, temperature=temperature,
             messages=[{"role": "system", "content": system_prompt}] + messages,
         )
         return completion.choices[0].message.content
@@ -629,10 +630,53 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "") -
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model=ANTHROPIC_MODEL, max_tokens=350, system=system_prompt, messages=messages,
+            model=ANTHROPIC_MODEL, max_tokens=350, temperature=temperature,
+            system=system_prompt, messages=messages,
         )
         return message.content[0].text
     return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
+
+
+# Ángulos distintos para pedirle a Limusin GPT recomendaciones — al refrescar
+# se rota de ángulo (no solo se sube la temperatura) para que las
+# recomendaciones cambien de enfoque de verdad, no solo de redacción.
+RECO_ANGLES = [
+    "prioriza qué región necesita intervención más urgente y por qué",
+    "prioriza dónde está el mayor margen de mejora sin coste adicional (comparado con la mejor región)",
+    "prioriza qué patrón se repite entre varias regiones parecidas y qué causa común podría tener",
+    "prioriza una decisión de gestión de rebaño (p.ej. candidatas a descarte o revisión de manejo posparto)",
+]
+
+
+def generate_ai_recommendations(
+    gran_key: str, metric_key: str, selected_keys: list[str], view_context: str, angle_idx: int = 0,
+) -> list[str] | None:
+    """Recomendaciones de negocio ganadero generadas por el LLM (Limusin GPT),
+    no solo estadísticas sueltas — con fallback a None si no hay clave de IA
+    configurada o la llamada falla, para que la UI caiga a generate_recommendations()."""
+    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
+        return None
+    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+        return None
+    filtered_table = ""
+    if metric_key or selected_keys:
+        filtered_table = build_metric_df(gran_key, metric_key, selected_keys).drop(columns=["key"]).to_string(index=False)
+    angle = RECO_ANGLES[angle_idx % len(RECO_ANGLES)]
+    prompt = (
+        f"Dame exactamente 3 recomendaciones de negocio ganadero para la vista actual del panel, "
+        f"cada una de 1-2 frases, en formato de lista con '- ' al principio de cada línea. "
+        f"No repitas los números tal cual salen en la tabla como si fuera el titular — cada "
+        f"recomendación tiene que ser una CONCLUSIÓN accionable (qué hacer o qué vigilar), no un dato "
+        f"suelto. Para esta tanda en particular, {angle}. No añadas introducción ni cierre, solo las 3 líneas."
+    )
+    try:
+        answer = call_llm([{"role": "user", "content": prompt}], view_context, filtered_table, temperature=0.55)
+    except Exception:
+        return None
+    if answer.startswith("⚠️"):
+        return None
+    lines = [l.strip(" -•").strip() for l in answer.splitlines() if l.strip(" -•").strip()]
+    return lines[:3] or None
 
 
 # ---------------------------------------------------------------- página
@@ -875,15 +919,37 @@ with col_main:
         st.dataframe(df_show, width="stretch")
 
 # ---- Panel de Recomendaciones: ocupa el hueco donde antes vivía Limusin
-# GPT. Reglas deterministas sobre los datos del ámbito activo (sin LLM), 2-3
-# líneas cortas — instantáneo y no depende de que Groq/Anthropic respondan.
+# GPT. Recomendaciones de negocio generadas por el LLM (conclusiones, no
+# datos sueltos), cacheadas por ámbito+ángulo para no llamar a la API en
+# cada rerun, con botón de refresco que rota el ángulo del análisis. Si no
+# hay clave de IA configurada (o falla la llamada), cae a las 3 reglas
+# deterministas de generate_recommendations() — el panel nunca se queda vacío.
 with col_reco:
     st.markdown('<div class="lim-gpt-card">', unsafe_allow_html=True)
-    st.markdown('<div class="lim-gpt-title">📌 Recomendaciones</div>', unsafe_allow_html=True)
-    st.caption("Basadas en los datos que estás viendo ahora mismo.")
+    title_col, refresh_col = st.columns([3, 1])
+    with title_col:
+        st.markdown('<div class="lim-gpt-title">📌 Recomendaciones</div>', unsafe_allow_html=True)
+    with refresh_col:
+        refresh_clicked = st.button("🔄", key="refresh_reco", help="Refrescar con otro enfoque")
+
+    reco_angle = st.session_state.get("reco_angle", 0)
+    if refresh_clicked:
+        reco_angle = (reco_angle + 1) % len(RECO_ANGLES)
+        st.session_state["reco_angle"] = reco_angle
+
+    reco_key = (gran_key, metric_key, tuple(sorted(selected_keys)), reco_angle)
+    reco_cache = st.session_state.setdefault("reco_cache", {})
+    if reco_key not in reco_cache:
+        view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
+        with st.spinner("Generando recomendaciones..."):
+            ai_recos = generate_ai_recommendations(gran_key, metric_key, selected_keys, view_desc, reco_angle)
+        reco_cache[reco_key] = ai_recos if ai_recos else generate_recommendations(gran_key, metric_key, selected_keys)
+
+    st.caption("Basadas en los datos que estás viendo ahora mismo · conclusiones de Limusin GPT.")
     with st.container(height=VIS_HEIGHT):
-        for reco in generate_recommendations(gran_key, metric_key, selected_keys):
-            st.markdown(f'<div class="lim-reco-item">{reco}</div>', unsafe_allow_html=True)
+        for reco in reco_cache[reco_key]:
+            reco_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", reco)
+            st.markdown(f'<div class="lim-reco-item">{reco_html}</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ---- Botón para abrir/cerrar Limusin GPT como sidebar lateral.
