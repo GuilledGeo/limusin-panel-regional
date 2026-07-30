@@ -509,65 +509,55 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
     estructura análisis (dato) → conclusión (qué significa) → recomendación
     (qué hacer), con longitud variable: no todos los bloques necesitan las
     3 partes igual de largas."""
+    # Deja explícito si la comparación es entre CCAA o entre provincias —
+    # el usuario pidió que se especifique, para no dar por hecho el nivel.
+    nivel_txt = "A nivel provincia" if gran_key == "provincia" else "A nivel comunidad autónoma"
+
     out = []
     for f in facts:
         if f["tipo"] == "descarte_manejo":
             ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
-            pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            pct_txt = f" ({f['pct_365']:.1f}% <365d)" if f["pct_365"] is not None else ""
             if f["tramo"] == "candidata_descarte":
                 out.append(
-                    f"🔴 Las {ganaderias} registran el intervalo entre partos más largo del conjunto: "
-                    f"**{f['valor']:.0f} días**{pct_txt}. Al superar los 450 días, sus vacas entran en el rango de "
-                    f"repetidora crónica, donde el cálculo económico cambia — mantenerlas a la espera de que "
-                    f"vuelvan a parir puede no compensar frente a su valor de venta como animal de abasto. "
-                    f"**Recomendación:** revisar caso a caso si conviene descartar o dar una última oportunidad "
-                    f"con seguimiento reforzado."
+                    f"🔴 {nivel_txt}, las {ganaderias} tienen el intervalo más largo: **{f['valor']:.0f} días**{pct_txt}, "
+                    f"por encima del umbral de repetidora crónica (450d). **Recomendación:** valorar descarte o venta caso a caso."
                 )
             elif f["tramo"] == "pierde_productividad":
                 out.append(
-                    f"🟠 Las {ganaderias} tienen un intervalo de **{f['valor']:.0f} días**{pct_txt}, ya por encima "
-                    f"del objetivo de 365. En este tramo (400-450 días) las vacas siguen siendo productivas pero "
-                    f"darán menos terneros a lo largo de su vida que con un ciclo anual, con el mismo coste de "
-                    f"mantenimiento. **Recomendación:** vigilar de cerca el manejo reproductivo antes de que escale "
-                    f"a candidata a descarte."
+                    f"🟠 {nivel_txt}, las {ganaderias} tienen un intervalo de **{f['valor']:.0f} días**{pct_txt}, "
+                    f"ya perdiendo productividad frente al objetivo de 365d. **Recomendación:** vigilar antes de que escale a descarte."
                 )
             else:
                 out.append(
-                    f"✅ El intervalo entre partos más largo de este conjunto está en las {ganaderias} "
-                    f"(**{f['valor']:.0f} días**{pct_txt}), todavía dentro de un rango aceptable, sin alarma de "
-                    f"descarte por ahora."
+                    f"✅ {nivel_txt}, el intervalo más largo del conjunto está en las {ganaderias} "
+                    f"(**{f['valor']:.0f} días**{pct_txt}), aún en rango aceptable — sin alarma de descarte."
                 )
         elif f["tipo"] == "vigilar_manejo":
             ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
-            pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            pct_txt = f" ({f['pct_365']:.1f}% <365d)" if f["pct_365"] is not None else ""
             out.append(
-                f"👀 Vigilar el manejo posparto en las {ganaderias}, que tienen un intervalo de "
-                f"**{f['valor']:.0f} días**{pct_txt}, lo que sugiere una oportunidad de mejora en nutrición y "
-                f"sanidad para acortar el intervalo entre partos."
+                f"👀 {nivel_txt}, vigilar el manejo posparto en las {ganaderias} (**{f['valor']:.0f} días**{pct_txt}) "
+                f"— oportunidad de mejora en nutrición/sanidad para acortar el intervalo."
             )
         elif f["tipo"] == "revisar_cubricion":
             ganaderias_peor = _ganaderias_de(f["region_peor"], f["key_peor"], gran_key)
             ganaderias_mejor = _ganaderias_de(f["region_mejor"], f["key_mejor"], gran_key)
             gap = f["valor_mejor"] - f["valor_peor"]
             out.append(
-                f"🎯 Las {ganaderias_peor} paren solo el **{f['valor_peor']:.1f}%** de sus nodrizas al año, frente "
-                f"al **{f['valor_mejor']:.1f}%** de las {ganaderias_mejor} — **{gap:.1f} puntos** de diferencia "
-                f"(n={f['n_peor']}). Cada vaca que no pare sigue comiendo y ocupando pasto sin generar ningún "
-                f"ingreso ese año: es el mayor punto de fuga de rentabilidad de la cría extensiva. "
-                f"**Recomendación:** revisar la estrategia de cubrición y fertilidad (nutrición pre-cubrición, "
-                f"genética, sanidad) antes de invertir en otros KPI."
+                f"🎯 {nivel_txt}, las {ganaderias_peor} paren solo el **{f['valor_peor']:.1f}%** frente al "
+                f"**{f['valor_mejor']:.1f}%** de las {ganaderias_mejor} (**{gap:.1f} puntos**, n={f['n_peor']}) — "
+                f"mayor punto de fuga de rentabilidad. **Recomendación:** revisar cubrición y fertilidad."
             )
         elif f["tipo"] == "aprender_lider":
             ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
             if f["valor_interparto"] is not None:
                 out.append(
-                    f"🏆 Las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** (n={f['n']}) y "
-                    f"además mantienen un intervalo de **{f['valor_interparto']:.0f} días** — el buen resultado no "
-                    f"depende de un solo KPI, sino de todo el ciclo reproductivo. Vale la pena documentar qué "
-                    f"prácticas de manejo, nutrición y cubrición usan estas ganaderías como referencia para el resto."
+                    f"🏆 {nivel_txt}, las {ganaderias} lideran la parición (**{f['valor_paricion']:.1f}%**, n={f['n']}) "
+                    f"y también rinden bien en interpartos (**{f['valor_interparto']:.0f} días**) — buen manejo en todo el ciclo, referencia a estudiar."
                 )
             else:
-                out.append(f"🏆 Las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** (n={f['n']}) — referencia a estudiar para el resto.")
+                out.append(f"🏆 {nivel_txt}, las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** (n={f['n']}) — referencia a estudiar.")
     return out
 
 
