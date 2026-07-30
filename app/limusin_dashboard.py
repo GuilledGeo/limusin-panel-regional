@@ -478,48 +478,96 @@ def compute_reco_facts(gran_key: str, selected_keys: list[str], offset: int = 0)
             "region_mejor": mejor_p["name"], "key_mejor": mejor_p["key"], "valor_mejor": float(mejor_p["valor"]),
         })
 
-    return facts[:3]
+    # 4º bloque: la región líder en parición, y cómo le va en interpartos —
+    # tono de aprendizaje/benchmark, no solo problemas, y da longitud extra
+    # para llenar el recuadro.
+    if len(df_p) >= 1:
+        lider_p = df_p.loc[df_p["valor"].idxmax()]
+        lider_i = GRANULARITIES[gran_key]["data"]["interparto"].get(lider_p["key"])
+        facts.append({
+            "tipo": "aprender_lider",
+            "region": lider_p["name"], "key": lider_p["key"],
+            "valor_paricion": float(lider_p["valor"]), "n": int(lider_p["n"]),
+            "valor_interparto": float(lider_i["valor"]) if lider_i else None,
+        })
+
+    return facts[:4]
+
+
+def _ganaderias_de(name: str, key: str, gran_key: str) -> str:
+    """"ganaderías Limousin de X" (sin artículo — cada frase antepone "Las"
+    o "las" según toque) en vez de hablar de la región como entidad, para
+    dejar claro que hablamos de las explotaciones ganaderas del tenant, no
+    de la comunidad/provincia como administración."""
+    return f"ganaderías Limousin de {_con_ccaa(name, key, gran_key)}"
 
 
 def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
     """Redacción 100% Python (sin LLM) de los hechos de compute_reco_facts,
     en el estilo aprobado (ver docs/prompt_recomendaciones_panel.md) —
-    fallback siempre disponible si la IA no responde."""
+    fallback siempre disponible si la IA no responde. Cada bloque sigue la
+    estructura análisis (dato) → conclusión (qué significa) → recomendación
+    (qué hacer), con longitud variable: no todos los bloques necesitan las
+    3 partes igual de largas."""
     out = []
     for f in facts:
         if f["tipo"] == "descarte_manejo":
-            region = _con_ccaa(f["region"], f["key"], gran_key)
-            pct_txt = f" y un {f['pct_365']:.1f}% de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
+            pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
             if f["tramo"] == "candidata_descarte":
                 out.append(
-                    f"Considerar el descarte o revisión de manejo de las vacas en {region}, con un intervalo de "
-                    f"{f['valor']:.0f} días{pct_txt}, ya que supera el umbral de repetidora crónica (más de 450 días)."
+                    f"🔴 Las {ganaderias} registran el intervalo entre partos más largo del conjunto: "
+                    f"**{f['valor']:.0f} días**{pct_txt}. Al superar los 450 días, sus vacas entran en el rango de "
+                    f"repetidora crónica, donde el cálculo económico cambia — mantenerlas a la espera de que "
+                    f"vuelvan a parir puede no compensar frente a su valor de venta como animal de abasto. "
+                    f"**Recomendación:** revisar caso a caso si conviene descartar o dar una última oportunidad "
+                    f"con seguimiento reforzado."
                 )
             elif f["tramo"] == "pierde_productividad":
                 out.append(
-                    f"Vigilar de cerca el manejo reproductivo en {region}, con un intervalo de {f['valor']:.0f} "
-                    f"días{pct_txt}, ya que empieza a perder productividad frente al objetivo de 365 días."
+                    f"🟠 Las {ganaderias} tienen un intervalo de **{f['valor']:.0f} días**{pct_txt}, ya por encima "
+                    f"del objetivo de 365. En este tramo (400-450 días) las vacas siguen siendo productivas pero "
+                    f"darán menos terneros a lo largo de su vida que con un ciclo anual, con el mismo coste de "
+                    f"mantenimiento. **Recomendación:** vigilar de cerca el manejo reproductivo antes de que escale "
+                    f"a candidata a descarte."
                 )
             else:
                 out.append(
-                    f"El intervalo entre partos más largo de este conjunto está en {region} ({f['valor']:.0f} "
-                    f"días{pct_txt}), todavía dentro de un rango aceptable, sin alarma de descarte por ahora."
+                    f"✅ El intervalo entre partos más largo de este conjunto está en las {ganaderias} "
+                    f"(**{f['valor']:.0f} días**{pct_txt}), todavía dentro de un rango aceptable, sin alarma de "
+                    f"descarte por ahora."
                 )
         elif f["tipo"] == "vigilar_manejo":
-            region = _con_ccaa(f["region"], f["key"], gran_key)
-            pct_txt = f" y un {f['pct_365']:.1f}% de intervalos menores a 365 días" if f["pct_365"] is not None else ""
+            ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
+            pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
             out.append(
-                f"Vigilar el manejo posparto en {region}, que tiene un intervalo de {f['valor']:.0f} días{pct_txt}, "
-                f"lo que sugiere una oportunidad de mejora en nutrición y sanidad para acortar el intervalo entre partos."
+                f"👀 Vigilar el manejo posparto en las {ganaderias}, que tienen un intervalo de "
+                f"**{f['valor']:.0f} días**{pct_txt}, lo que sugiere una oportunidad de mejora en nutrición y "
+                f"sanidad para acortar el intervalo entre partos."
             )
         elif f["tipo"] == "revisar_cubricion":
-            region_peor = _con_ccaa(f["region_peor"], f["key_peor"], gran_key)
-            region_mejor = _con_ccaa(f["region_mejor"], f["key_mejor"], gran_key)
+            ganaderias_peor = _ganaderias_de(f["region_peor"], f["key_peor"], gran_key)
+            ganaderias_mejor = _ganaderias_de(f["region_mejor"], f["key_mejor"], gran_key)
+            gap = f["valor_mejor"] - f["valor_peor"]
             out.append(
-                f"Revisar la estrategia de cubrición y fertilidad en {region_peor}, con un índice de parición del "
-                f"{f['valor_peor']:.1f}%, significativamente más bajo que el {f['valor_mejor']:.1f}% de {region_mejor}, "
-                f"para identificar oportunidades de mejora reproductiva y aumentar la eficiencia del rebaño."
+                f"🎯 Las {ganaderias_peor} paren solo el **{f['valor_peor']:.1f}%** de sus nodrizas al año, frente "
+                f"al **{f['valor_mejor']:.1f}%** de las {ganaderias_mejor} — **{gap:.1f} puntos** de diferencia "
+                f"(n={f['n_peor']}). Cada vaca que no pare sigue comiendo y ocupando pasto sin generar ningún "
+                f"ingreso ese año: es el mayor punto de fuga de rentabilidad de la cría extensiva. "
+                f"**Recomendación:** revisar la estrategia de cubrición y fertilidad (nutrición pre-cubrición, "
+                f"genética, sanidad) antes de invertir en otros KPI."
             )
+        elif f["tipo"] == "aprender_lider":
+            ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
+            if f["valor_interparto"] is not None:
+                out.append(
+                    f"🏆 Las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** (n={f['n']}) y "
+                    f"además mantienen un intervalo de **{f['valor_interparto']:.0f} días** — el buen resultado no "
+                    f"depende de un solo KPI, sino de todo el ciclo reproductivo. Vale la pena documentar qué "
+                    f"prácticas de manejo, nutrición y cubrición usan estas ganaderías como referencia para el resto."
+                )
+            else:
+                out.append(f"🏆 Las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** (n={f['n']}) — referencia a estudiar para el resto.")
     return out
 
 
@@ -655,9 +703,10 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
 2. Nunca inventes una cifra decimal que no esté literalmente en los datos.
    Si necesitas calcular algo (una diferencia, una media, un ratio), muestra
    la cuenta con los números reales.
-3. Si el n de una región es bajo (menos de 100 hembras/intervalos, o menos
-   de 20-30 a nivel provincia), avisa de que el dato es poco fiable antes de
-   sacar conclusiones fuertes sobre ella.
+3. Si el n de una región es muy bajo y la pregunta trata justo sobre ella,
+   menciónalo en una frase corta ("ojo, muestra pequeña, n=X"). El panel ya
+   avisa visualmente de las muestras pequeñas — no lo conviertas en un
+   párrafo aparte ni lo repitas si no es central para la respuesta.
 4. Cuando compares dos regiones, da los dos números exactos y la diferencia,
    no solo una valoración cualitativa. Usa los datos por provincia si
    preguntan por una provincia, o por comunidad autónoma si preguntan por
@@ -694,10 +743,10 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
    b. Usa la correlación (r) entre parición e intervalo ya calculada arriba
       para hablar de la tendencia general, no solo de casos sueltos —
       indica si es fuerte/débil y qué significa en la práctica.
-   c. Cruza el tamaño de muestra (n_hembras/n_intervalos) con los valores:
-      ¿las regiones con más nodrizas (más consolidadas, más dato) tienden a
-      rendir distinto que las de muestra pequeña? Adviértelo como patrón,
-      no solo como advertencia de fiabilidad.
+   c. Solo si es relevante para la pregunta: si el tamaño de muestra
+      explica claramente parte del patrón, apúntalo en una frase — no lo
+      conviertas en un desarrollo aparte por sistema, el panel ya avisa de
+      las muestras pequeñas visualmente.
    d. Busca agrupaciones/outliers: ¿hay varias regiones parecidas que
       podrían compartir causa común (p.ej. mismo rango de intervalo, mismo
       nivel de parición) frente a una o dos que se salen claramente de la
@@ -707,9 +756,13 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
       patrón se repite entre regiones parecidas, y qué haría distinto una
       explotación con esos números — no una lista de datos, una conclusión.
 8. Responde en español, tono directo de consultor, sin rodeos ni relleno.
-   SÉ BREVE por defecto: 3-5 frases o 3-4 líneas en total (bullets cortos si
-   ayudan), no un informe. Solo alárgate si el usuario pide explícitamente
-   más detalle ("profundiza", "explícamelo mejor", "más análisis").
+   SÉ BREVE SIEMPRE, sin excepción por defecto: 2-4 frases como máximo
+   (o 3-4 líneas si usas bullets), aunque la pregunta invite a un análisis
+   holístico — prioriza la conclusión más importante, no listes todos los
+   patrones posibles. No repitas el disclaimer de muestra pequeña si no es
+   el punto central de la respuesta. Solo alárgate si el usuario pide
+   explícitamente más detalle ("profundiza", "explícamelo mejor", "más
+   análisis", "no te cortes").
 9. Eres Limusin GPT, un agente especializado ÚNICAMENTE en producción de
    ganadería cárnica y su productividad como negocio — no un chatbot
    generalista. Si te preguntan algo ajeno a esta materia (temas
