@@ -627,6 +627,17 @@ def generate_ai_recommendations_v2(gran_key: str, view_context: str, offset: int
         f"sea posible). Formato de cada línea: empieza con un emoji (🔴 alarma grave, 🟠 aviso, ✅ sin "
         f"alarma, 👀 vigilar, 🎯 estrategia, 🏆 referencia positiva) + 'Las ganaderías Limousin de "
         f"[región]...' + al menos una cifra exacta en **negrita** + si aplica, '**Recomendación:** ...'. "
+        f"AL MENOS 2 de las 3 recomendaciones deben ser una COMPARATIVA explícita entre dos regiones "
+        f"(ej. 'Las ganaderías Limousin de X paren un **Y%**, frente al **Z%** de las de W'), no solo un "
+        f"dato aislado de una región suelta — cita ambas cifras y ambos nombres, y la diferencia entre "
+        f"ellas. La tercera puede ser un dato individual si aporta algo distinto (p.ej. un hito o alerta "
+        f"puntual).\n"
+        f"REGLA ESTRICTA DE NIVEL: hay DOS tablas (una por comunidad autónoma, otra por provincia) — estás "
+        f"trabajando {nivel_txt}, así que TODA comparación debe ser entre dos filas de ESA MISMA tabla "
+        f"(dos comunidades autónomas entre sí, o dos provincias entre sí). NUNCA compares una comunidad "
+        f"autónoma con una provincia en la misma frase, aunque el nombre se parezca (p.ej. Madrid como "
+        f"CCAA y Madrid como provincia son la misma fila, pero Álava es una PROVINCIA, no una CCAA — no la "
+        f"uses si estás {nivel_txt.replace('por ', 'a nivel ')} de comunidad autónoma).\n"
         f"Para esta tanda en particular: {variante}.\n"
         f"IMPORTANTE — NO menciones ni cites la columna pct_menos_365d (el % de intervalos ≤365 días) bajo "
         f"ningún concepto: es una cifra fácil de malinterpretar (confundir con el % de intervalos largos, "
@@ -644,7 +655,9 @@ def generate_ai_recommendations_v2(gran_key: str, view_context: str, offset: int
         f"ibas a escribir, cambia la frase — no la fuerces. Solo cuando hayas verificado los tres puntos, "
         f"escribe la línea final.\n"
         f"Devuelve solo las 3 líneas ya verificadas, una por bloque, sin numerarlas, sin mostrar el "
-        f"chequeo ni añadir introducción/cierre."
+        f"chequeo ni añadir introducción/cierre. Escribe cada línea como una frase completa y natural — "
+        f"NUNCA uses puntos suspensivos ('...') como relleno entre el nombre de la región y la cifra ni en "
+        f"ningún otro punto de la frase."
     )
     try:
         answer = call_llm([{"role": "user", "content": prompt}], view_context, temperature=0.5)
@@ -1202,13 +1215,13 @@ with col_reco:
     with st.container(height=VIS_HEIGHT):
         # 3 bloques independientes — el usuario pidió expresamente que sea
         # la IA quien busque y decida (generate_ai_recommendations_v2), no
-        # solo que redacte hechos ya fijados. Riesgo conocido: con el modelo
-        # pequeño puede malinterpretar un matiz (ya pasó con pct_365d
-        # invertido) — por eso el prompt insiste en esa definición exacta, y
-        # si la IA no responde o el gate de contención bloquea, cae sin
-        # aviso a render_facts_deterministico() (100% fiable, mismo estilo).
+        # solo que redacte hechos ya fijados. Restringido a nivel CCAA: en
+        # pruebas reales acertó 5/6 a nivel CCAA (11 filas) pero solo 1/3 a
+        # nivel provincia (39 filas) — llegó a inventar una provincia que ni
+        # está en los datos y a declarar "la más alta" una que no lo era. A
+        # nivel provincia se usa siempre el determinista, 100% fiable.
         view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
-        frases = generate_ai_recommendations_v2(gran_key, view_desc, offset=reco_angle)
+        frases = generate_ai_recommendations_v2(gran_key, view_desc, offset=reco_angle) if gran_key == "ccaa" else None
         if not frases:
             facts = compute_reco_facts(gran_key, selected_keys, offset=reco_angle)
             frases = render_facts_deterministico(facts, gran_key)
