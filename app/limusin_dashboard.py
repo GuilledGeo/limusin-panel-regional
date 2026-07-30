@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import urllib.request
 
 import pandas as pd
@@ -612,29 +614,75 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
 """
 
 
+# ---------------------------------------------------------------- freno de
+# peticiones a la IA: gates propios, independientes del rate limit real de
+# Groq/Anthropic, para no gastar la cuota gratuita en ráfagas (varios
+# visitantes a la vez, o clics repetidos en "🔄 Refrescar"). Estado a nivel
+# de módulo (no de sesión) porque en Streamlit Cloud todas las sesiones de
+# un mismo despliegue comparten el mismo proceso Python — el freno protege
+# la cuota real, compartida por todos los visitantes.
+_LLM_LOCK = threading.Lock()
+_LLM_STATE = {"last_call_ts": 0.0, "call_times": []}
+LLM_MIN_INTERVAL_SECONDS = 5   # espera mínima entre dos peticiones cualquiera
+LLM_MAX_CALLS_PER_MINUTE = 10  # tope adicional en ráfaga
+
+
+def _llm_rate_gate() -> str | None:
+    """None si se puede proceder; si no, un mensaje de aviso ya listo para
+    mostrar en vez de la respuesta de la IA."""
+    now = time.time()
+    with _LLM_LOCK:
+        elapsed = now - _LLM_STATE["last_call_ts"]
+        if elapsed < LLM_MIN_INTERVAL_SECONDS:
+            wait = LLM_MIN_INTERVAL_SECONDS - elapsed
+            return f"⏳ Espera {wait:.0f}s antes de la siguiente pregunta — protege la cuota gratuita de la IA."
+        times = _LLM_STATE["call_times"]
+        while times and now - times[0] > 60:
+            times.pop(0)
+        if len(times) >= LLM_MAX_CALLS_PER_MINUTE:
+            return (f"⚠️ Demasiadas peticiones a la IA en el último minuto (límite propio de "
+                     f"{LLM_MAX_CALLS_PER_MINUTE}/min para cuidar la cuota gratuita). Espera un poco.")
+        _LLM_STATE["last_call_ts"] = now
+        times.append(now)
+        return None
+
+
 def call_llm(messages: list, view_context: str = "", filtered_table: str = "", temperature: float = 0.2) -> str:
+    """Nunca lanza excepción — cualquier fallo de la API (rate limit, timeout,
+    clave inválida...) se convierte en un mensaje de aviso legible, para que
+    ni el chat ni el panel de Recomendaciones puedan tumbar la app entera."""
+    gate_msg = _llm_rate_gate()
+    if gate_msg:
+        return gate_msg
     system_prompt = build_context(view_context, filtered_table)
-    if AI_PROVIDER == "groq":
-        if not GROQ_API_KEY:
-            return "⚠️ Falta configurar `GROQ_API_KEY` en `.env` para poder usar Limusin GPT."
-        from groq import Groq
-        client = Groq(api_key=GROQ_API_KEY)
-        completion = client.chat.completions.create(
-            model=GROQ_MODEL, max_tokens=350, temperature=temperature,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
-        )
-        return completion.choices[0].message.content
-    elif AI_PROVIDER == "anthropic":
-        if not ANTHROPIC_API_KEY:
-            return "⚠️ Falta configurar `ANTHROPIC_API_KEY` en `.env` para poder usar Limusin GPT."
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        message = client.messages.create(
-            model=ANTHROPIC_MODEL, max_tokens=350, temperature=temperature,
-            system=system_prompt, messages=messages,
-        )
-        return message.content[0].text
-    return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
+    try:
+        if AI_PROVIDER == "groq":
+            if not GROQ_API_KEY:
+                return "⚠️ Falta configurar `GROQ_API_KEY` en `.env` para poder usar Limusin GPT."
+            from groq import Groq
+            client = Groq(api_key=GROQ_API_KEY)
+            completion = client.chat.completions.create(
+                model=GROQ_MODEL, max_tokens=350, temperature=temperature,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+            )
+            return completion.choices[0].message.content
+        elif AI_PROVIDER == "anthropic":
+            if not ANTHROPIC_API_KEY:
+                return "⚠️ Falta configurar `ANTHROPIC_API_KEY` en `.env` para poder usar Limusin GPT."
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            message = client.messages.create(
+                model=ANTHROPIC_MODEL, max_tokens=350, temperature=temperature,
+                system=system_prompt, messages=messages,
+            )
+            return message.content[0].text
+        return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
+    except Exception as e:
+        err_name = type(e).__name__
+        if "RateLimit" in err_name:
+            return ("⚠️ Límite de peticiones a la IA alcanzado por ahora (la clave gratuita de Groq "
+                     "tiene cuota limitada por minuto). Espera un momento y vuelve a preguntar.")
+        return f"⚠️ No se pudo contactar con la IA ahora mismo ({err_name}). Prueba de nuevo en un momento."
 
 
 # Ángulos distintos para pedirle a Limusin GPT recomendaciones — al refrescar
@@ -676,7 +724,7 @@ def generate_ai_recommendations(
         answer = call_llm([{"role": "user", "content": prompt}], view_context, filtered_table, temperature=0.55)
     except Exception:
         return None
-    if answer.startswith("⚠️"):
+    if answer.startswith("⚠️") or answer.startswith("⏳"):
         return None
     lines = [l.strip(" -•").strip() for l in answer.splitlines() if l.strip(" -•").strip()]
     return lines[:3] or None
