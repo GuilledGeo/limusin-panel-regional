@@ -410,10 +410,12 @@ def compute_kpis(gran_key: str = "ccaa", selected_keys: list[str] | None = None)
     }
 
 
-def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list[str]) -> list[str]:
+def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list[str], angle_idx: int = 0) -> list[str]:
     """2-3 recomendaciones cortas basadas en los datos reales del ámbito
-    activo — deterministas (sin LLM), para que el panel de recomendaciones
-    sea instantáneo y nunca dependa de la disponibilidad de Groq/Anthropic."""
+    activo — deterministas (sin LLM: nunca alucinan, son instantáneas y no
+    dependen de la disponibilidad ni de la cuota de Groq/Anthropic). El
+    ángulo (0/1/2) varía el enfoque para que el botón de refrescar dé
+    variedad real sin necesitar una llamada a la IA."""
     cfg = METRIC_META[metric_key]
     df = build_metric_df(gran_key, metric_key, selected_keys)
     df = df[df["n"] >= 10]  # descarta muestras demasiado pequeñas para recomendar sobre ellas
@@ -425,39 +427,69 @@ def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list
     else:
         worst, best = df.loc[df["valor"].idxmax()], df.loc[df["valor"].idxmin()]
     unit = GRANULARITIES[gran_key]["unit_label"]
+    unidad_txt = "%" if metric_key == "paricion" else " días"
+    fmt = (lambda v: f"{v:.1f}%") if metric_key == "paricion" else (lambda v: f"{v:.0f} días")
 
+    angle = angle_idx % 3
     recos = []
-    if metric_key == "paricion":
+
+    if angle == 0:
+        # Ángulo 1 (por defecto): peor región + margen con la mejor + alerta de umbral.
+        if metric_key == "paricion":
+            recos.append(
+                f"🔻 **{worst['name']}** tiene el índice de parición más bajo ({worst['valor']:.1f}%, "
+                f"n={int(worst['n'])}) — señal de fertilidad/cubrición, no de destete."
+            )
+            gap = abs(best["valor"] - worst["valor"])
+            recos.append(f"📊 **{gap:.1f} puntos** de diferencia con {best['name']} ({best['valor']:.1f}%) — margen real sin coste extra de mantenimiento.")
+            low = df[df["valor"] < 60]
+            recos.append(
+                f"⚠️ {len(low)} {unit}(s) por debajo del 60% de parición ({', '.join(low.sort_values('valor')['name'].head(3))})."
+                if len(low) else "✅ Ninguna región baja del 60% de parición en este conjunto — sin alarma grave de fertilidad."
+            )
+        else:
+            recos.append(
+                f"🔻 **{worst['name']}** tiene el intervalo más largo ({worst['valor']:.0f} días, "
+                f"n={int(worst['n'])}) — >400d ya pierde terneros de por vida; revisar reconcepción posparto."
+            )
+            gap = abs(best["valor"] - worst["valor"])
+            recos.append(f"📊 **{gap:.0f} días** de diferencia con {best['name']} ({best['valor']:.0f}d) — cerrarla es más partos por vaca a igual coste anual.")
+            alarm = df[df["valor"] > 420]
+            recos.append(
+                f"⚠️ {len(alarm)} {unit}(s) por encima de 420 días ({', '.join(alarm.sort_values('valor', ascending=False)['name'].head(3))}) — revisar candidatas a descarte."
+                if len(alarm) else "✅ Ninguna región supera los 420 días — sin señal de descarte urgente por este KPI."
+            )
+
+    elif angle == 1:
+        # Ángulo 2: qué funciona bien (líder + segundo) y si es una referencia fiable.
+        df_by_best = df.sort_values("valor", ascending=not cfg["higher_is_better"])
+        second = df_by_best.iloc[1]
         recos.append(
-            f"🔻 **{worst['name']}** tiene el índice de parición más bajo ({worst['valor']:.1f}%, "
-            f"n={int(worst['n'])}) — señal de fertilidad/cubrición, no de destete."
+            f"🏆 **{best['name']}** lidera con {fmt(best['valor'])} (n={int(best['n'])}) — referencia a estudiar: "
+            "qué maneja distinto en cubrición/nutrición respecto al resto."
         )
-        gap = abs(best["valor"] - worst["valor"])
-        recos.append(
-            f"📊 **{gap:.1f} puntos** de diferencia con "
-            f"{best['name']} ({best['valor']:.1f}%) — margen real sin coste extra de mantenimiento."
-        )
-        low = df[df["valor"] < 60]
-        recos.append(
-            f"⚠️ {len(low)} {unit}(s) por debajo del 60% de parición ({', '.join(low.sort_values('valor')['name'].head(3))})."
-            if len(low) else "✅ Ninguna región baja del 60% de parición en este conjunto — sin alarma grave de fertilidad."
-        )
+        gap2 = abs(best["valor"] - second["valor"])
+        recos.append(f"📊 Solo **{gap2:.1f}{unidad_txt}** la separan de **{second['name']}** ({fmt(second['valor'])}) — el segundo puesto está cerca, no es un caso aislado.")
+        reliability = "muestra grande, dato fiable" if best["n"] >= 500 else "muestra moderada, contrastar antes de generalizar"
+        recos.append(f"🔎 Con n={int(best['n'])} en {best['name']}, es {reliability} para tomarla como referencia del sector.")
+
     else:
+        # Ángulo 3: patrones de fiabilidad — tamaño de muestra vs. resultado.
+        corr = df["n"].corr(df["valor"])
+        corr_txt = "positiva" if corr and corr > 0.2 else ("negativa" if corr and corr < -0.2 else "prácticamente nula")
         recos.append(
-            f"🔻 **{worst['name']}** tiene el intervalo más largo ({worst['valor']:.0f} días, "
-            f"n={int(worst['n'])}) — >400d ya pierde terneros de por vida; revisar reconcepción posparto."
+            f"🔎 Correlación entre tamaño de muestra y {cfg['label'].lower()}: **{corr:.2f}** ({corr_txt}) — "
+            + ("las regiones más consolidadas tienden a rendir distinto del resto." if corr_txt != "prácticamente nula"
+               else "el tamaño de la ganadería no explica por sí solo el resultado, hay que mirar manejo.")
         )
-        gap = abs(best["valor"] - worst["valor"])
+        small = df[df["n"] < 100]
         recos.append(
-            f"📊 **{gap:.0f} días** de diferencia con "
-            f"{best['name']} ({best['valor']:.0f}d) — cerrarla es más partos por vaca a igual coste anual."
+            f"⚠️ {len(small)} {unit}(s) con muestra pequeña (&lt;100): {', '.join(small.sort_values('n')['name'].head(3))} — tomar sus cifras con cautela."
+            if len(small) else "✅ Todas las regiones de este conjunto tienen muestra ≥100 — datos razonablemente sólidos."
         )
-        alarm = df[df["valor"] > 420]
-        recos.append(
-            f"⚠️ {len(alarm)} {unit}(s) por encima de 420 días ({', '.join(alarm.sort_values('valor', ascending=False)['name'].head(3))}) "
-            "— revisar candidatas a descarte de repetidoras crónicas."
-            if len(alarm) else "✅ Ninguna región supera los 420 días — sin señal de descarte urgente por este KPI."
-        )
+        mid = df["valor"].median()
+        recos.append(f"📐 Mediana del conjunto: **{fmt(mid)}** — {best['name']} y {worst['name']} son los extremos, el resto se mueve alrededor de ese valor típico.")
+
     return recos[:3]
 
 
@@ -684,50 +716,6 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "", t
                      "tiene cuota limitada por minuto). Espera un momento y vuelve a preguntar.")
         return f"⚠️ No se pudo contactar con la IA ahora mismo ({err_name}). Prueba de nuevo en un momento."
 
-
-# Ángulos distintos para pedirle a Limusin GPT recomendaciones — al refrescar
-# se rota de ángulo (no solo se sube la temperatura) para que las
-# recomendaciones cambien de enfoque de verdad, no solo de redacción.
-RECO_ANGLES = [
-    "prioriza qué región necesita intervención más urgente y por qué",
-    "prioriza dónde está el mayor margen de mejora sin coste adicional (comparado con la mejor región)",
-    "prioriza qué patrón se repite entre varias regiones parecidas y qué causa común podría tener",
-    "prioriza una decisión de gestión de rebaño (p.ej. candidatas a descarte o revisión de manejo posparto)",
-]
-
-
-def generate_ai_recommendations(
-    gran_key: str, metric_key: str, selected_keys: list[str], view_context: str, angle_idx: int = 0,
-) -> list[str] | None:
-    """Recomendaciones de negocio ganadero generadas por el LLM (Limusin GPT),
-    no solo estadísticas sueltas — con fallback a None si no hay clave de IA
-    configurada o la llamada falla, para que la UI caiga a generate_recommendations()."""
-    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
-        return None
-    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
-        return None
-    filtered_table = ""
-    if metric_key or selected_keys:
-        filtered_table = build_metric_df(gran_key, metric_key, selected_keys).drop(columns=["key"]).to_string(index=False)
-    angle = RECO_ANGLES[angle_idx % len(RECO_ANGLES)]
-    prompt = (
-        f"Dame exactamente 3 recomendaciones de negocio ganadero para la vista actual del panel, "
-        f"cada una de 1-2 frases, en formato de lista con '- ' al principio de cada línea. "
-        f"Cada recomendación tiene que ser una CONCLUSIÓN accionable (qué hacer o qué vigilar), no "
-        f"un titular que solo repita un dato — PERO cada una debe citar al menos una cifra o "
-        f"comparación EXACTA de la tabla como evidencia que la sustente (ej. '49,6% en Madrid frente "
-        f"al 74,5% de País Vasco', o 'intervalo de 400 días en Andalucía vs. 384 en Madrid'), para dar "
-        f"contexto numérico y que no suene a opinión sin base. Para esta tanda en particular, {angle}. "
-        f"No añadas introducción ni cierre, solo las 3 líneas."
-    )
-    try:
-        answer = call_llm([{"role": "user", "content": prompt}], view_context, filtered_table, temperature=0.55)
-    except Exception:
-        return None
-    if answer.startswith("⚠️") or answer.startswith("⏳"):
-        return None
-    lines = [l.strip(" -•").strip() for l in answer.splitlines() if l.strip(" -•").strip()]
-    return lines[:3] or None
 
 
 # ---------------------------------------------------------------- página
@@ -970,11 +958,12 @@ with col_main:
         st.dataframe(df_show, width="stretch")
 
 # ---- Panel de Recomendaciones: ocupa el hueco donde antes vivía Limusin
-# GPT. Recomendaciones de negocio generadas por el LLM (conclusiones, no
-# datos sueltos), cacheadas por ámbito+ángulo para no llamar a la API en
-# cada rerun, con botón de refresco que rota el ángulo del análisis. Si no
-# hay clave de IA configurada (o falla la llamada), cae a las 3 reglas
-# deterministas de generate_recommendations() — el panel nunca se queda vacío.
+# GPT. 100% deterministas (generate_recommendations, sin llamar al LLM): el
+# usuario prefirió este formato conciso con emojis/negrita frente a las
+# versiones generadas por IA, que además con el modelo pequeño (necesario
+# para no agotar la cuota gratuita) a veces señalaban una región equivocada
+# como "la peor". El botón de refresco rota el ángulo del análisis (3
+# variantes), instantáneo y sin ningún riesgo de rate limit.
 with col_reco:
     st.markdown('<div class="lim-gpt-card">', unsafe_allow_html=True)
     title_col, refresh_col = st.columns([3, 1])
@@ -985,20 +974,12 @@ with col_reco:
 
     reco_angle = st.session_state.get("reco_angle", 0)
     if refresh_clicked:
-        reco_angle = (reco_angle + 1) % len(RECO_ANGLES)
+        reco_angle = (reco_angle + 1) % 3
         st.session_state["reco_angle"] = reco_angle
 
-    reco_key = (gran_key, metric_key, tuple(sorted(selected_keys)), reco_angle)
-    reco_cache = st.session_state.setdefault("reco_cache", {})
-    if reco_key not in reco_cache:
-        view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
-        with st.spinner("Generando recomendaciones..."):
-            ai_recos = generate_ai_recommendations(gran_key, metric_key, selected_keys, view_desc, reco_angle)
-        reco_cache[reco_key] = ai_recos if ai_recos else generate_recommendations(gran_key, metric_key, selected_keys)
-
-    st.caption("Basadas en los datos que estás viendo ahora mismo · conclusiones de Limusin GPT.")
+    st.caption("Basadas en los datos que estás viendo ahora mismo.")
     with st.container(height=VIS_HEIGHT):
-        for reco in reco_cache[reco_key]:
+        for reco in generate_recommendations(gran_key, metric_key, selected_keys, reco_angle):
             reco_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", reco)
             st.markdown(f'<div class="lim-reco-item">{reco_html}</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
