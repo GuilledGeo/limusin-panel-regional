@@ -478,11 +478,30 @@ def compute_reco_facts(gran_key: str, selected_keys: list[str], offset: int = 0)
             "region_mejor": mejor_p["name"], "key_mejor": mejor_p["key"], "valor_mejor": float(mejor_p["valor"]),
         })
 
-    # 4º bloque: la región líder en parición, y cómo le va en interpartos —
-    # tono de aprendizaje/benchmark, no solo problemas, y da longitud extra
-    # para llenar el recuadro.
+    # A nivel CCAA, añade un vistazo a nivel provincia dentro de la peor CCAA
+    # de parición — más profundidad cruzando escalas, no solo CCAA sueltas.
+    if gran_key == "ccaa" and len(df_p) >= 1:
+        peor_ccaa = df_p.loc[df_p["valor"].idxmin()]
+        prov_codes = set(CCAA_TO_PROV_CODES.get(peor_ccaa["name"], []))
+        df_prov_ccaa = pd.DataFrame([
+            {"key": code, "name": PROVINCIA_NAME.get(code, code), **PARICION_PROV_2025[code]}
+            for code in prov_codes if code in PARICION_PROV_2025 and PARICION_PROV_2025[code]["n"] >= 10
+        ])
+        if len(df_prov_ccaa) >= 1:
+            peor_prov = df_prov_ccaa.loc[df_prov_ccaa["valor"].idxmin()]
+            facts.append({
+                "tipo": "detalle_provincia",
+                "region_ccaa": peor_ccaa["name"], "region_prov": peor_prov["name"], "key_prov": peor_prov["key"],
+                "valor_ccaa": float(peor_ccaa["valor"]), "valor_prov": float(peor_prov["valor"]), "n_prov": int(peor_prov["n"]),
+            })
+
+    # Región líder en parición (rota con offset entre las 3 mejores, para
+    # que el refresco cambie de verdad) y cómo le va en interpartos — tono
+    # de aprendizaje/benchmark, no solo problemas.
     if len(df_p) >= 1:
-        lider_p = df_p.loc[df_p["valor"].idxmax()]
+        df_p_best_sorted = df_p.sort_values("valor", ascending=False)
+        idx_lider = offset % min(3, len(df_p_best_sorted))
+        lider_p = df_p_best_sorted.iloc[idx_lider]
         lider_i = GRANULARITIES[gran_key]["data"]["interparto"].get(lider_p["key"])
         facts.append({
             "tipo": "aprender_lider",
@@ -491,7 +510,7 @@ def compute_reco_facts(gran_key: str, selected_keys: list[str], offset: int = 0)
             "valor_interparto": float(lider_i["valor"]) if lider_i else None,
         })
 
-    return facts[:4]
+    return facts[:5]
 
 
 def _ganaderias_de(name: str, key: str, gran_key: str) -> str:
@@ -509,10 +528,8 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
     estructura análisis (dato) → conclusión (qué significa) → recomendación
     (qué hacer), con longitud variable: no todos los bloques necesitan las
     3 partes igual de largas."""
-    # Deja explícito si la comparación es entre CCAA o entre provincias —
-    # el usuario pidió que se especifique, para no dar por hecho el nivel.
-    nivel_txt = "A nivel provincia" if gran_key == "provincia" else "A nivel comunidad autónoma"
-
+    # El nivel (CCAA/provincia) ya se indica una vez en el subtítulo del
+    # panel — no hace falta repetirlo en cada frase.
     out = []
     for f in facts:
         if f["tipo"] == "descarte_manejo":
@@ -520,7 +537,7 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
             pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
             if f["tramo"] == "candidata_descarte":
                 out.append(
-                    f"🔴 {nivel_txt}, las {ganaderias} registran el intervalo entre partos más largo del conjunto: "
+                    f"🔴 Las {ganaderias} registran el intervalo entre partos más largo del conjunto: "
                     f"**{f['valor']:.0f} días**{pct_txt}. Al superar los 450 días, sus vacas entran en el rango de "
                     f"repetidora crónica, donde el cálculo económico cambia — mantenerlas a la espera de que "
                     f"vuelvan a parir puede no compensar frente a su valor de venta como animal de abasto. "
@@ -529,15 +546,15 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
                 )
             elif f["tramo"] == "pierde_productividad":
                 out.append(
-                    f"🟠 {nivel_txt}, las {ganaderias} tienen un intervalo de **{f['valor']:.0f} días**{pct_txt}, ya "
-                    f"por encima del objetivo de 365. En este tramo (400-450 días) las vacas siguen siendo "
-                    f"productivas pero darán menos terneros a lo largo de su vida que con un ciclo anual, con el "
-                    f"mismo coste de mantenimiento. **Recomendación:** vigilar de cerca el manejo reproductivo "
-                    f"antes de que escale a candidata a descarte."
+                    f"🟠 Las {ganaderias} tienen un intervalo de **{f['valor']:.0f} días**{pct_txt}, ya por encima "
+                    f"del objetivo de 365. En este tramo (400-450 días) las vacas siguen siendo productivas pero "
+                    f"darán menos terneros a lo largo de su vida que con un ciclo anual, con el mismo coste de "
+                    f"mantenimiento. **Recomendación:** vigilar de cerca el manejo reproductivo antes de que "
+                    f"escale a candidata a descarte."
                 )
             else:
                 out.append(
-                    f"✅ {nivel_txt}, el intervalo entre partos más largo de este conjunto está en las {ganaderias} "
+                    f"✅ El intervalo entre partos más largo de este conjunto está en las {ganaderias} "
                     f"(**{f['valor']:.0f} días**{pct_txt}), todavía dentro de un rango aceptable, sin alarma de "
                     f"descarte por ahora."
                 )
@@ -545,7 +562,7 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
             ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
             pct_txt = f" y un **{f['pct_365']:.1f}%** de intervalos menores a 365 días" if f["pct_365"] is not None else ""
             out.append(
-                f"👀 {nivel_txt}, vigilar el manejo posparto en las {ganaderias}, que tienen un intervalo de "
+                f"👀 Vigilar el manejo posparto en las {ganaderias}, que tienen un intervalo de "
                 f"**{f['valor']:.0f} días**{pct_txt}, lo que sugiere una oportunidad de mejora en nutrición y "
                 f"sanidad para acortar el intervalo entre partos."
             )
@@ -554,26 +571,89 @@ def render_facts_deterministico(facts: list[dict], gran_key: str) -> list[str]:
             ganaderias_mejor = _ganaderias_de(f["region_mejor"], f["key_mejor"], gran_key)
             gap = f["valor_mejor"] - f["valor_peor"]
             out.append(
-                f"🎯 {nivel_txt}, las {ganaderias_peor} paren solo el **{f['valor_peor']:.1f}%** de sus nodrizas al "
-                f"año, frente al **{f['valor_mejor']:.1f}%** de las {ganaderias_mejor} — **{gap:.1f} puntos** de "
-                f"diferencia (n={f['n_peor']}). Cada vaca que no pare sigue comiendo y ocupando pasto sin generar "
-                f"ningún ingreso ese año: es el mayor punto de fuga de rentabilidad de la cría extensiva. "
+                f"🎯 Las {ganaderias_peor} paren solo el **{f['valor_peor']:.1f}%** de sus nodrizas al año, frente "
+                f"al **{f['valor_mejor']:.1f}%** de las {ganaderias_mejor} — **{gap:.1f} puntos** de diferencia "
+                f"(n={f['n_peor']}). Cada vaca que no pare sigue comiendo y ocupando pasto sin generar ningún "
+                f"ingreso ese año: es el mayor punto de fuga de rentabilidad de la cría extensiva. "
                 f"**Recomendación:** revisar la estrategia de cubrición y fertilidad (nutrición pre-cubrición, "
                 f"genética, sanidad) antes de invertir en otros KPI."
             )
+        elif f["tipo"] == "detalle_provincia":
+            ccaa_nombre = f["region_ccaa"]
+            out.append(
+                f"🔍 Bajando a nivel provincia dentro de {ccaa_nombre} (**{f['valor_ccaa']:.1f}%** de parición): "
+                f"la provincia que más arrastra el dato es **{f['region_prov']}** (**{f['valor_prov']:.1f}%**, "
+                f"n={f['n_prov']}) — ahí es donde priorizar el seguimiento, no en toda la comunidad por igual."
+            )
         elif f["tipo"] == "aprender_lider":
             # Bloque corto e informativo (2 líneas) a propósito — para
-            # rellenar el hueco tras los 3 análisis largos de arriba, sin
-            # forzar el mismo nivel de razonamiento en los 4.
+            # rellenar el hueco tras los análisis largos de arriba, sin
+            # forzar el mismo nivel de razonamiento en todos los bloques.
             ganaderias = _ganaderias_de(f["region"], f["key"], gran_key)
             if f["valor_interparto"] is not None:
                 out.append(
-                    f"🏆 {nivel_txt}: las {ganaderias} lideran la parición (**{f['valor_paricion']:.1f}%**) y también "
-                    f"rinden bien en interpartos (**{f['valor_interparto']:.0f} días**) — referencia a estudiar."
+                    f"🏆 Las {ganaderias} lideran la parición (**{f['valor_paricion']:.1f}%**) y también rinden bien "
+                    f"en interpartos (**{f['valor_interparto']:.0f} días**) — referencia a estudiar."
                 )
             else:
-                out.append(f"🏆 {nivel_txt}: las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** — referencia a estudiar.")
+                out.append(f"🏆 Las {ganaderias} lideran la parición con un **{f['valor_paricion']:.1f}%** — referencia a estudiar.")
     return out
+
+
+RECO_AI_ANGLES = [
+    "prioriza qué región necesita intervención más urgente en intervalo entre partos",
+    "prioriza dónde está el mayor margen de mejora en índice de parición frente al líder",
+    "prioriza qué región lidera y qué patrón de manejo podría explicarlo",
+    "cruza ambos análisis (parición e interpartos) para señalar una región con un problema compuesto en ambos KPI",
+]
+
+
+def generate_ai_recommendations_v2(gran_key: str, view_context: str, offset: int = 0) -> list[str] | None:
+    """La IA busca ELLA MISMA en las tablas completas (ya incluidas en el
+    system prompt de build_context) qué regiones destacar — a diferencia de
+    phrase_facts_with_ai, aquí decide, no solo redacta. Devuelve None si no
+    hay clave, el gate de contención bloquea, la llamada falla, o la
+    respuesta no parece válida — la UI cae entonces a
+    render_facts_deterministico(), que nunca falla ni alucina."""
+    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
+        return None
+    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+        return None
+    nivel_txt = "por provincia" if gran_key == "provincia" else "por comunidad autónoma"
+    variante = RECO_AI_ANGLES[offset % len(RECO_AI_ANGLES)]
+    prompt = (
+        f"Busca tú mismo en los datos {nivel_txt} (usa las tablas ya indicadas arriba) y dame EXACTAMENTE "
+        f"3 recomendaciones de negocio ganadero, independientes entre sí (sobre regiones distintas cuando "
+        f"sea posible). Formato de cada línea: empieza con un emoji (🔴 alarma grave, 🟠 aviso, ✅ sin "
+        f"alarma, 👀 vigilar, 🎯 estrategia, 🏆 referencia positiva) + 'Las ganaderías Limousin de "
+        f"[región]...' + al menos una cifra exacta en **negrita** + si aplica, '**Recomendación:** ...'. "
+        f"Para esta tanda en particular: {variante}.\n"
+        f"IMPORTANTE — NO menciones ni cites la columna pct_menos_365d (el % de intervalos ≤365 días) bajo "
+        f"ningún concepto: es una cifra fácil de malinterpretar (confundir con el % de intervalos largos, "
+        f"que es justo lo contrario) y en pruebas anteriores se ha citado al revés varias veces. Usa "
+        f"ÚNICAMENTE índice de parición (%) e intervalo entre partos (días) para tus 3 recomendaciones, "
+        f"que son inequívocos.\n"
+        f"VERIFICA cada cifra contra la tabla antes de escribirla — no inventes, no redondees de más, no "
+        f"confundas cuál región es la peor/mejor.\n"
+        f"ANTES de escribir cada línea final, haz este chequeo en silencio (no lo muestres, es solo para "
+        f"ti): (1) relee la fila completa de la región elegida en la tabla — todos sus valores, no solo el "
+        f"que vas a citar; (2) confirma comparándola con al menos 2-3 filas más que de verdad es la peor/"
+        f"mejor en lo que vas a decir, no solo la primera que te ha parecido destacable; (3) confirma qué "
+        f"significa exactamente cada columna (relee la definición de pct_menos_365d de arriba) antes de "
+        f"calificar un valor como bueno o malo. Si al hacer este chequeo ves que la cifra no dice lo que "
+        f"ibas a escribir, cambia la frase — no la fuerces. Solo cuando hayas verificado los tres puntos, "
+        f"escribe la línea final.\n"
+        f"Devuelve solo las 3 líneas ya verificadas, una por bloque, sin numerarlas, sin mostrar el "
+        f"chequeo ni añadir introducción/cierre."
+    )
+    try:
+        answer = call_llm([{"role": "user", "content": prompt}], view_context, temperature=0.5)
+    except Exception:
+        return None
+    if answer.startswith("⚠️") or answer.startswith("⏳"):
+        return None
+    lines = [l.strip(" -•").strip() for l in answer.splitlines() if l.strip(" -•").strip()]
+    return lines[:3] if len(lines) >= 2 else None
 
 
 def phrase_facts_with_ai(facts: list[dict], gran_key: str, view_context: str) -> list[str] | None:
@@ -1110,21 +1190,21 @@ with col_reco:
         reco_angle = (reco_angle + 1) % 3
         st.session_state["reco_angle"] = reco_angle
 
-    st.caption("Basadas en los datos que estás viendo ahora mismo.")
+    st.caption(f"Basadas en los datos que estás viendo ahora mismo ({gran['label'].lower()}) · conclusiones de Limusin GPT.")
     with st.container(height=VIS_HEIGHT):
-        # 3 bloques independientes, cada uno su propia tarjeta, sobre una
-        # región distinta — los hechos los calcula compute_reco_facts()
-        # (determinista, ver docs/prompt_recomendaciones_panel.md).
-        # phrase_facts_with_ai() existe pero NO se usa aquí: en pruebas
-        # reales, incluso con instrucciones estrictas de "no cambiar
-        # hechos", el modelo pequeño reformulaba el matiz de forma confusa
-        # (p.ej. convertía "sin alarma de descarte" en una frase que sonaba
-        # a lo contrario) — demasiado riesgo para un panel de recomendaciones
-        # de negocio. La redacción determinista ya iguala el estilo pedido.
-        facts = compute_reco_facts(gran_key, selected_keys, offset=reco_angle)
-        frases = render_facts_deterministico(facts, gran_key)
+        # 3 bloques independientes — el usuario pidió expresamente que sea
+        # la IA quien busque y decida (generate_ai_recommendations_v2), no
+        # solo que redacte hechos ya fijados. Riesgo conocido: con el modelo
+        # pequeño puede malinterpretar un matiz (ya pasó con pct_365d
+        # invertido) — por eso el prompt insiste en esa definición exacta, y
+        # si la IA no responde o el gate de contención bloquea, cae sin
+        # aviso a render_facts_deterministico() (100% fiable, mismo estilo).
+        view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
+        frases = generate_ai_recommendations_v2(gran_key, view_desc, offset=reco_angle)
         if not frases:
-            frases = ["No hay suficientes regiones con muestra fiable en este filtro para generar recomendaciones."]
+            facts = compute_reco_facts(gran_key, selected_keys, offset=reco_angle)
+            frases = render_facts_deterministico(facts, gran_key)
+        frases = frases[:3] if frases else ["No hay suficientes regiones con muestra fiable en este filtro para generar recomendaciones."]
         for reco in frases:
             reco_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", reco)
             st.markdown(f'<div class="lim-reco-item">{reco_html}</div>', unsafe_allow_html=True)
