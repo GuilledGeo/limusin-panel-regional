@@ -665,9 +665,12 @@ def generate_ai_recommendations(
     prompt = (
         f"Dame exactamente 3 recomendaciones de negocio ganadero para la vista actual del panel, "
         f"cada una de 1-2 frases, en formato de lista con '- ' al principio de cada línea. "
-        f"No repitas los números tal cual salen en la tabla como si fuera el titular — cada "
-        f"recomendación tiene que ser una CONCLUSIÓN accionable (qué hacer o qué vigilar), no un dato "
-        f"suelto. Para esta tanda en particular, {angle}. No añadas introducción ni cierre, solo las 3 líneas."
+        f"Cada recomendación tiene que ser una CONCLUSIÓN accionable (qué hacer o qué vigilar), no "
+        f"un titular que solo repita un dato — PERO cada una debe citar al menos una cifra o "
+        f"comparación EXACTA de la tabla como evidencia que la sustente (ej. '49,6% en Madrid frente "
+        f"al 74,5% de País Vasco', o 'intervalo de 400 días en Andalucía vs. 384 en Madrid'), para dar "
+        f"contexto numérico y que no suene a opinión sin base. Para esta tanda en particular, {angle}. "
+        f"No añadas introducción ni cierre, solo las 3 líneas."
     )
     try:
         answer = call_llm([{"role": "user", "content": prompt}], view_context, filtered_table, temperature=0.55)
