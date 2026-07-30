@@ -407,6 +407,57 @@ def compute_kpis(gran_key: str = "ccaa", selected_keys: list[str] | None = None)
     }
 
 
+def generate_recommendations(gran_key: str, metric_key: str, selected_keys: list[str]) -> list[str]:
+    """2-3 recomendaciones cortas basadas en los datos reales del ámbito
+    activo — deterministas (sin LLM), para que el panel de recomendaciones
+    sea instantáneo y nunca dependa de la disponibilidad de Groq/Anthropic."""
+    cfg = METRIC_META[metric_key]
+    df = build_metric_df(gran_key, metric_key, selected_keys)
+    df = df[df["n"] >= 10]  # descarta muestras demasiado pequeñas para recomendar sobre ellas
+    if len(df) < 2:
+        return ["No hay suficientes regiones con muestra fiable en este filtro para generar recomendaciones."]
+
+    if cfg["higher_is_better"]:
+        worst, best = df.loc[df["valor"].idxmin()], df.loc[df["valor"].idxmax()]
+    else:
+        worst, best = df.loc[df["valor"].idxmax()], df.loc[df["valor"].idxmin()]
+    unit = GRANULARITIES[gran_key]["unit_label"]
+
+    recos = []
+    if metric_key == "paricion":
+        recos.append(
+            f"🔻 **{worst['name']}** tiene el índice de parición más bajo ({worst['valor']:.1f}%, "
+            f"n={int(worst['n'])}) — señal de fertilidad/cubrición, no de destete."
+        )
+        gap = abs(best["valor"] - worst["valor"])
+        recos.append(
+            f"📊 **{gap:.1f} puntos** de diferencia con "
+            f"{best['name']} ({best['valor']:.1f}%) — margen real sin coste extra de mantenimiento."
+        )
+        low = df[df["valor"] < 60]
+        recos.append(
+            f"⚠️ {len(low)} {unit}(s) por debajo del 60% de parición ({', '.join(low.sort_values('valor')['name'].head(3))})."
+            if len(low) else "✅ Ninguna región baja del 60% de parición en este conjunto — sin alarma grave de fertilidad."
+        )
+    else:
+        recos.append(
+            f"🔻 **{worst['name']}** tiene el intervalo más largo ({worst['valor']:.0f} días, "
+            f"n={int(worst['n'])}) — >400d ya pierde terneros de por vida; revisar reconcepción posparto."
+        )
+        gap = abs(best["valor"] - worst["valor"])
+        recos.append(
+            f"📊 **{gap:.0f} días** de diferencia con "
+            f"{best['name']} ({best['valor']:.0f}d) — cerrarla es más partos por vaca a igual coste anual."
+        )
+        alarm = df[df["valor"] > 420]
+        recos.append(
+            f"⚠️ {len(alarm)} {unit}(s) por encima de 420 días ({', '.join(alarm.sort_values('valor', ascending=False)['name'].head(3))}) "
+            "— revisar candidatas a descarte de repetidoras crónicas."
+            if len(alarm) else "✅ Ninguna región supera los 420 días — sin señal de descarte urgente por este KPI."
+        )
+    return recos[:3]
+
+
 # ---------------------------------------------------------------- IA conversacional ("Limusin GPT")
 def build_context(view_context: str = "", filtered_table: str = "") -> str:
     rows_ccaa = []
@@ -546,6 +597,9 @@ REGLAS PARA RESPONDER (que no alucines es lo más importante):
       patrón se repite entre regiones parecidas, y qué haría distinto una
       explotación con esos números — no una lista de datos, una conclusión.
 8. Responde en español, tono directo de consultor, sin rodeos ni relleno.
+   SÉ BREVE por defecto: 3-5 frases o 3-4 líneas en total (bullets cortos si
+   ayudan), no un informe. Solo alárgate si el usuario pide explícitamente
+   más detalle ("profundiza", "explícamelo mejor", "más análisis").
 9. Eres Limusin GPT, un agente especializado ÚNICAMENTE en producción de
    ganadería cárnica y su productividad como negocio — no un chatbot
    generalista. Si te preguntan algo ajeno a esta materia (temas
@@ -565,7 +619,7 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "") -
         from groq import Groq
         client = Groq(api_key=GROQ_API_KEY)
         completion = client.chat.completions.create(
-            model=GROQ_MODEL, max_tokens=700, temperature=0.2,
+            model=GROQ_MODEL, max_tokens=350, temperature=0.2,
             messages=[{"role": "system", "content": system_prompt}] + messages,
         )
         return completion.choices[0].message.content
@@ -575,7 +629,7 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "") -
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model=ANTHROPIC_MODEL, max_tokens=700, system=system_prompt, messages=messages,
+            model=ANTHROPIC_MODEL, max_tokens=350, system=system_prompt, messages=messages,
         )
         return message.content[0].text
     return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
@@ -640,6 +694,11 @@ st.markdown(f"""
     .lim-badge {{
         display: inline-block; background: {BRAND_GREEN}; color: #fff;
         border-radius: 999px; padding: 1px 10px; font-size: 0.68rem; font-weight: 700;
+    }}
+    .lim-reco-item {{
+        background: #ffffff; border: 1px solid #e7e5df; border-left: 3px solid {BRAND_GREEN};
+        border-radius: 10px; padding: 8px 10px; margin-bottom: 8px;
+        font-size: 0.82rem; line-height: 1.35; color: {INK};
     }}
     div[data-testid="stChatInput"] textarea {{ background: #fff; }}
     button[data-testid="stBaseButton-secondary"] {{
@@ -763,12 +822,19 @@ with kpi_slot:
 
 cfg = METRIC_META[metric_key]
 
-# ---- Ranking (izquierda) + mapa (centro, más grande) PEGADOS + Limusin GPT
-# a la derecha. Mapa, ranking y el chat de la IA comparten la misma altura
-# real (VIS_HEIGHT), sin contenedores de altura fija anidados (eso causaba
-# scroll con hueco en blanco) — cada elemento define su propia altura y ya
-# salen igualados. La columna del mapa/ranking predomina en anchura.
-col_main, col_gpt = st.columns([3.3, 1], gap="medium")
+# ---- Ranking (izquierda) + mapa (centro, más grande) PEGADOS + panel de
+# Recomendaciones (en el hueco donde antes vivía Limusin GPT) + Limusin GPT
+# como sidebar plegable en el lateral derecho (botón para abrir/cerrar).
+# Mapa, ranking y las tarjetas laterales comparten la misma altura real
+# (VIS_HEIGHT), sin contenedores de altura fija anidados (eso causaba scroll
+# con hueco en blanco) — cada elemento define su propia altura y ya salen
+# igualados. La columna del mapa/ranking predomina en anchura.
+gpt_open = st.session_state.get("gpt_open", True)
+if gpt_open:
+    col_main, col_reco, col_toggle, col_gpt = st.columns([3.3, 1, 0.14, 1.3], gap="small")
+else:
+    col_main, col_reco, col_toggle = st.columns([3.3, 1, 0.14], gap="small")
+    col_gpt = None
 
 with col_main:
     st.markdown('<div class="lim-card">', unsafe_allow_html=True)
@@ -808,6 +874,26 @@ with col_main:
         }).set_index(gran["unit_label"].capitalize())
         st.dataframe(df_show, width="stretch")
 
+# ---- Panel de Recomendaciones: ocupa el hueco donde antes vivía Limusin
+# GPT. Reglas deterministas sobre los datos del ámbito activo (sin LLM), 2-3
+# líneas cortas — instantáneo y no depende de que Groq/Anthropic respondan.
+with col_reco:
+    st.markdown('<div class="lim-gpt-card">', unsafe_allow_html=True)
+    st.markdown('<div class="lim-gpt-title">📌 Recomendaciones</div>', unsafe_allow_html=True)
+    st.caption("Basadas en los datos que estás viendo ahora mismo.")
+    with st.container(height=VIS_HEIGHT):
+        for reco in generate_recommendations(gran_key, metric_key, selected_keys):
+            st.markdown(f'<div class="lim-reco-item">{reco}</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ---- Botón para abrir/cerrar Limusin GPT como sidebar lateral.
+with col_toggle:
+    st.write("")
+    st.write("")
+    if st.button("◂" if gpt_open else "💬", key="toggle_gpt", help="Mostrar/ocultar Limusin GPT", use_container_width=True):
+        st.session_state["gpt_open"] = not gpt_open
+        st.rerun()
+
 # Clic en una CCAA del mapa (solo tiene sentido en nivel CCAA, sin filtro
 # activo) -> equivale a seleccionarla a mano en "Filtrar por Comunidad
 # Autónoma": fuerza la vista a sus provincias.
@@ -818,54 +904,55 @@ if gran_key == "ccaa" and map_state and map_state.get("selection", {}).get("poin
         st.session_state["ccaa_filter"] = [clicked_name]
         st.rerun()
 
-with col_gpt:
-    st.markdown('<div class="lim-gpt-card">', unsafe_allow_html=True)
-    st.markdown('<div class="lim-gpt-title">🐮 Limusin GPT <span class="lim-badge">BETA</span></div>', unsafe_allow_html=True)
-    st.caption("Agente IA especializado en producción de ganaderías cárnicas.")
+if col_gpt is not None:
+    with col_gpt:
+        st.markdown('<div class="lim-gpt-card">', unsafe_allow_html=True)
+        st.markdown('<div class="lim-gpt-title">🐮 Limusin GPT <span class="lim-badge">BETA</span></div>', unsafe_allow_html=True)
+        st.caption("Agente IA especializado en producción de ganaderías cárnicas.")
 
-    if "limusin_chat" not in st.session_state:
-        st.session_state.limusin_chat = []
+        if "limusin_chat" not in st.session_state:
+            st.session_state.limusin_chat = []
 
-    SUGGESTIONS = [
-        "¿Diferencia Aragón/Cataluña?",
-        "¿Qué provincia pare más?",
-        "¿Relación parición-interpartos?",
-    ]
-    clicked = None
+        SUGGESTIONS = [
+            "¿Diferencia Aragón/Cataluña?",
+            "¿Qué provincia pare más?",
+            "¿Relación parición-interpartos?",
+        ]
+        clicked = None
 
-    # Misma altura que el mapa/ranking (VIS_HEIGHT), para que las tres
-    # columnas queden visualmente igualadas sin envolver en un contenedor
-    # de altura fija adicional (eso es lo que causaba el scroll en blanco).
-    chat_box = st.container(height=VIS_HEIGHT)
-    with chat_box:
-        if not st.session_state.limusin_chat:
-            st.chat_message("assistant").write(
-                "Pregúntame sobre el índice de parición o el espacio interpartos, "
-                "por Comunidad Autónoma o por provincia, año 2025."
-            )
-            # Los chips solo aparecen antes del primer mensaje, DENTRO de la
-            # cajetilla de chat (pegados abajo del todo) — en cuanto se
-            # pregunta otra cosa, desaparecen (ya no se cumple la condición).
-            for s in SUGGESTIONS:
-                if st.button(s, key=f"chip_{s}", use_container_width=True):
-                    clicked = s
-        for msg in st.session_state.limusin_chat:
-            st.chat_message(msg["role"]).write(msg["content"])
-
-    prompt = st.chat_input("Pregunta a Limusin GPT...") or clicked
-    if prompt:
-        st.session_state.limusin_chat.append({"role": "user", "content": prompt})
+        # Misma altura que el mapa/ranking (VIS_HEIGHT), para que las tres
+        # columnas queden visualmente igualadas sin envolver en un contenedor
+        # de altura fija adicional (eso es lo que causaba el scroll en blanco).
+        chat_box = st.container(height=VIS_HEIGHT)
         with chat_box:
-            st.chat_message("user").write(prompt)
-            with st.chat_message("assistant"):
-                with st.spinner("Limusin GPT está pensando..."):
-                    current_view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
-                    filtered_table = ""
-                    if ccaa_filter:
-                        sub_df = build_metric_df(gran_key, metric_key, selected_keys).drop(columns=["key"])
-                        filtered_table = sub_df.to_string(index=False)
-                    answer = call_llm(st.session_state.limusin_chat, current_view_desc, filtered_table)
-                st.write(answer)
-        st.session_state.limusin_chat.append({"role": "assistant", "content": answer})
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+            if not st.session_state.limusin_chat:
+                st.chat_message("assistant").write(
+                    "Pregúntame sobre el índice de parición o el espacio interpartos, "
+                    "por Comunidad Autónoma o por provincia, año 2025."
+                )
+                # Los chips solo aparecen antes del primer mensaje, DENTRO de la
+                # cajetilla de chat (pegados abajo del todo) — en cuanto se
+                # pregunta otra cosa, desaparecen (ya no se cumple la condición).
+                for s in SUGGESTIONS:
+                    if st.button(s, key=f"chip_{s}", use_container_width=True):
+                        clicked = s
+            for msg in st.session_state.limusin_chat:
+                st.chat_message(msg["role"]).write(msg["content"])
+
+        prompt = st.chat_input("Pregunta a Limusin GPT...") or clicked
+        if prompt:
+            st.session_state.limusin_chat.append({"role": "user", "content": prompt})
+            with chat_box:
+                st.chat_message("user").write(prompt)
+                with st.chat_message("assistant"):
+                    with st.spinner("Limusin GPT está pensando..."):
+                        current_view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
+                        filtered_table = ""
+                        if ccaa_filter:
+                            sub_df = build_metric_df(gran_key, metric_key, selected_keys).drop(columns=["key"])
+                            filtered_table = sub_df.to_string(index=False)
+                        answer = call_llm(st.session_state.limusin_chat, current_view_desc, filtered_table)
+                    st.write(answer)
+            st.session_state.limusin_chat.append({"role": "assistant", "content": answer})
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
