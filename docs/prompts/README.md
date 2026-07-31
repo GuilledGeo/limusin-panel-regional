@@ -34,6 +34,17 @@ equivocado en toda la sesión) sigue activo automáticamente si la IA no
 responde o el gate de contención bloquea — pero no sustituye una respuesta
 de la IA que tenga formato válido aunque el contenido sea incorrecto.
 
+## Proveedores soportados
+
+`AI_PROVIDER` en `.env`/Secrets puede ser `"groq"` (gratis, el que se usa
+hoy), `"gemini"` (Google AI Studio, cuenta de empresa con acceso de pago —
+añadido 2026-07-31, ver `GEMINI_API_KEY`/`GEMINI_MODEL` en
+`config/settings.py`) o `"anthropic"` (Claude, objetivo de producción
+original). Cambiar de proveedor es tan simple como cambiar `AI_PROVIDER` y
+la clave correspondiente — `call_llm()` en `limusin_dashboard.py` tiene una
+rama por proveedor, y `_current_model_tier()`/`MODEL_TIERS` deciden solos
+qué prompt usar según el modelo activo, sea cual sea el proveedor.
+
 ## Por qué dos versiones de "Recomendaciones" y no del chat
 
 El panel de Recomendaciones (`generate_ai_recommendations_v2` en
