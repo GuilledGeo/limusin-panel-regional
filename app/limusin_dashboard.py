@@ -27,6 +27,8 @@ from config.settings import (
     AI_PROVIDER,
     ANTHROPIC_API_KEY,
     ANTHROPIC_MODEL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
     GROQ_API_KEY,
     GROQ_MODEL,
 )
@@ -44,6 +46,8 @@ MODEL_TIERS = {
     "llama-3.1-8b-instant": "small",
     "llama-3.3-70b-versatile": "large",
     "claude-sonnet-4-6": "large",
+    "gemini-2.5-flash": "large",
+    "gemini-2.5-pro": "large",
 }
 CCAA_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-communities.geojson"
 PROV_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-provinces.geojson"
@@ -629,9 +633,7 @@ def generate_ai_recommendations_v2(gran_key: str, view_context: str, offset: int
     docs/prompts/README.md. Devuelve None si no hay clave, el gate de
     contención bloquea, la llamada falla, o la respuesta no parece válida —
     la UI cae entonces a render_facts_deterministico(), que nunca alucina."""
-    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
-        return None
-    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+    if not _current_provider_has_key():
         return None
     nivel_txt = "por provincia" if gran_key == "provincia" else "por comunidad autónoma"
     variante = RECO_AI_ANGLES[offset % len(RECO_AI_ANGLES)]
@@ -653,9 +655,7 @@ def phrase_facts_with_ai(facts: list[dict], gran_key: str, view_context: str) ->
     docs/prompt_recomendaciones_panel.md. Devuelve None si no hay clave, si
     el gate de contención bloquea, o si la llamada falla — la UI cae
     entonces a render_facts_deterministico()."""
-    if AI_PROVIDER == "groq" and not GROQ_API_KEY:
-        return None
-    if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
+    if not _current_provider_has_key():
         return None
     deterministico = render_facts_deterministico(facts, gran_key)
     if not deterministico:
@@ -778,10 +778,25 @@ def _llm_rate_gate() -> str | None:
 
 def _current_model_tier() -> str:
     """"small" o "large" según el modelo activo (AI_PROVIDER + GROQ_MODEL/
-    ANTHROPIC_MODEL) contra MODEL_TIERS — ver docs/prompts/README.md.
-    Cualquier modelo no listado cae en "small" (más prudente)."""
-    modelo = GROQ_MODEL if AI_PROVIDER == "groq" else ANTHROPIC_MODEL
+    ANTHROPIC_MODEL/GEMINI_MODEL) contra MODEL_TIERS — ver
+    docs/prompts/README.md. Cualquier modelo no listado cae en "small"
+    (más prudente)."""
+    if AI_PROVIDER == "groq":
+        modelo = GROQ_MODEL
+    elif AI_PROVIDER == "gemini":
+        modelo = GEMINI_MODEL
+    else:
+        modelo = ANTHROPIC_MODEL
     return MODEL_TIERS.get(modelo, "small")
+
+
+def _current_provider_has_key() -> bool:
+    """Si el proveedor de IA activo (AI_PROVIDER) tiene su clave configurada."""
+    if AI_PROVIDER == "groq":
+        return bool(GROQ_API_KEY)
+    if AI_PROVIDER == "gemini":
+        return bool(GEMINI_API_KEY)
+    return bool(ANTHROPIC_API_KEY)
 
 
 @st.cache_data(show_spinner=False)
@@ -826,12 +841,30 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "", t
                 system=system_prompt, messages=messages,
             )
             return message.content[0].text
+        elif AI_PROVIDER == "gemini":
+            if not GEMINI_API_KEY:
+                return "⚠️ Falta configurar `GEMINI_API_KEY` en `.env` para poder usar Limusin GPT."
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            gemini_contents = [
+                {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+                for m in messages
+            ]
+            response = client.models.generate_content(
+                model=GEMINI_MODEL, contents=gemini_contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt, temperature=temperature, max_output_tokens=350,
+                ),
+            )
+            return response.text
         return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
     except Exception as e:
         err_name = type(e).__name__
-        if "RateLimit" in err_name:
-            return ("⚠️ Límite de peticiones a la IA alcanzado por ahora (la clave gratuita de Groq "
-                     "tiene cuota limitada por minuto). Espera un momento y vuelve a preguntar.")
+        err_txt = str(e)
+        if "RateLimit" in err_name or "429" in err_txt or "RESOURCE_EXHAUSTED" in err_txt:
+            return ("⚠️ Límite de peticiones a la IA alcanzado por ahora (cuota limitada por minuto). "
+                     "Espera un momento y vuelve a preguntar.")
         return f"⚠️ No se pudo contactar con la IA ahora mismo ({err_name}). Prueba de nuevo en un momento."
 
 
