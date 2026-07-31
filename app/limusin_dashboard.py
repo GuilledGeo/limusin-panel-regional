@@ -33,6 +33,18 @@ from config.settings import (
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGO_PATH = os.path.join(REPO_ROOT, "Logo_ixorigue-BpQt6KE7.png")
+PROMPTS_DIR = os.path.join(REPO_ROOT, "docs", "prompts")
+
+# Qué prompt de docs/prompts/recomendaciones_prompt_{tier}_model.md usar
+# según el modelo activo — ver docs/prompts/README.md para el porqué. Un
+# modelo NO listado aquí cae en "small" por defecto (más prudente asumir
+# limitado que asumir capaz sin haberlo probado). Para cambiar de modelo
+# sin tocar código, basta con añadir su entrada aquí.
+MODEL_TIERS = {
+    "llama-3.1-8b-instant": "small",
+    "llama-3.3-70b-versatile": "large",
+    "claude-sonnet-4-6": "large",
+}
 CCAA_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-communities.geojson"
 PROV_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-provinces.geojson"
 
@@ -611,54 +623,21 @@ RECO_AI_ANGLES = [
 def generate_ai_recommendations_v2(gran_key: str, view_context: str, offset: int = 0) -> list[str] | None:
     """La IA busca ELLA MISMA en las tablas completas (ya incluidas en el
     system prompt de build_context) qué regiones destacar — a diferencia de
-    phrase_facts_with_ai, aquí decide, no solo redacta. Devuelve None si no
-    hay clave, el gate de contención bloquea, la llamada falla, o la
-    respuesta no parece válida — la UI cae entonces a
-    render_facts_deterministico(), que nunca falla ni alucina."""
+    phrase_facts_with_ai, aquí decide, no solo redacta. El prompt exacto
+    depende de _current_model_tier() — docs/prompts/recomendaciones_prompt_
+    small_model.md (con guardas extra) o _large_model.md (más simple), ver
+    docs/prompts/README.md. Devuelve None si no hay clave, el gate de
+    contención bloquea, la llamada falla, o la respuesta no parece válida —
+    la UI cae entonces a render_facts_deterministico(), que nunca alucina."""
     if AI_PROVIDER == "groq" and not GROQ_API_KEY:
         return None
     if AI_PROVIDER == "anthropic" and not ANTHROPIC_API_KEY:
         return None
     nivel_txt = "por provincia" if gran_key == "provincia" else "por comunidad autónoma"
     variante = RECO_AI_ANGLES[offset % len(RECO_AI_ANGLES)]
-    prompt = (
-        f"Busca tú mismo en los datos {nivel_txt} (usa las tablas ya indicadas arriba) y dame EXACTAMENTE "
-        f"3 recomendaciones de negocio ganadero, independientes entre sí (sobre regiones distintas cuando "
-        f"sea posible). Formato de cada línea: empieza con un emoji (🔴 alarma grave, 🟠 aviso, ✅ sin "
-        f"alarma, 👀 vigilar, 🎯 estrategia, 🏆 referencia positiva) + 'Las ganaderías Limousin de "
-        f"[región]...' + al menos una cifra exacta en **negrita** + si aplica, '**Recomendación:** ...'. "
-        f"AL MENOS 2 de las 3 recomendaciones deben ser una COMPARATIVA explícita entre dos regiones "
-        f"(ej. 'Las ganaderías Limousin de X paren un **Y%**, frente al **Z%** de las de W'), no solo un "
-        f"dato aislado de una región suelta — cita ambas cifras y ambos nombres, y la diferencia entre "
-        f"ellas. La tercera puede ser un dato individual si aporta algo distinto (p.ej. un hito o alerta "
-        f"puntual).\n"
-        f"REGLA ESTRICTA DE NIVEL: hay DOS tablas (una por comunidad autónoma, otra por provincia) — estás "
-        f"trabajando {nivel_txt}, así que TODA comparación debe ser entre dos filas de ESA MISMA tabla "
-        f"(dos comunidades autónomas entre sí, o dos provincias entre sí). NUNCA compares una comunidad "
-        f"autónoma con una provincia en la misma frase, aunque el nombre se parezca (p.ej. Madrid como "
-        f"CCAA y Madrid como provincia son la misma fila, pero Álava es una PROVINCIA, no una CCAA — no la "
-        f"uses si estás {nivel_txt.replace('por ', 'a nivel ')} de comunidad autónoma).\n"
-        f"Para esta tanda en particular: {variante}.\n"
-        f"IMPORTANTE — NO menciones ni cites la columna pct_menos_365d (el % de intervalos ≤365 días) bajo "
-        f"ningún concepto: es una cifra fácil de malinterpretar (confundir con el % de intervalos largos, "
-        f"que es justo lo contrario) y en pruebas anteriores se ha citado al revés varias veces. Usa "
-        f"ÚNICAMENTE índice de parición (%) e intervalo entre partos (días) para tus 3 recomendaciones, "
-        f"que son inequívocos.\n"
-        f"VERIFICA cada cifra contra la tabla antes de escribirla — no inventes, no redondees de más, no "
-        f"confundas cuál región es la peor/mejor.\n"
-        f"ANTES de escribir cada línea final, haz este chequeo en silencio (no lo muestres, es solo para "
-        f"ti): (1) relee la fila completa de la región elegida en la tabla — todos sus valores, no solo el "
-        f"que vas a citar; (2) confirma comparándola con al menos 2-3 filas más que de verdad es la peor/"
-        f"mejor en lo que vas a decir, no solo la primera que te ha parecido destacable; (3) confirma qué "
-        f"significa exactamente cada columna (relee la definición de pct_menos_365d de arriba) antes de "
-        f"calificar un valor como bueno o malo. Si al hacer este chequeo ves que la cifra no dice lo que "
-        f"ibas a escribir, cambia la frase — no la fuerces. Solo cuando hayas verificado los tres puntos, "
-        f"escribe la línea final.\n"
-        f"Devuelve solo las 3 líneas ya verificadas, una por bloque, sin numerarlas, sin mostrar el "
-        f"chequeo ni añadir introducción/cierre. Escribe cada línea como una frase completa y natural — "
-        f"NUNCA uses puntos suspensivos ('...') como relleno entre el nombre de la región y la cifra ni en "
-        f"ningún otro punto de la frase."
-    )
+    tier = _current_model_tier()
+    template = _load_prompt_md(f"recomendaciones_prompt_{tier}_model.md")
+    prompt = template.format(nivel_txt=nivel_txt, variante=variante)
     try:
         answer = call_llm([{"role": "user", "content": prompt}], view_context, temperature=0.5)
     except Exception:
@@ -749,127 +728,19 @@ entera:
 {filtered_table}
 """ if filtered_table else ""
 
-    return f"""Eres "Limusin GPT", un agente especializado en ganadería de
-carne en modo empresa y productividad: piensas como un consultor de negocio
-para producción de vacuno de carne, modelo de cría con vaca nodriza
-(cow-calf, razas tipo Limousin). No eres un lector de tablas: interpretas
-los números como lo haría un consultor que ayuda a un ganadero a tomar
-decisiones — en qué franja/provincia hay margen de mejora, y qué
-implicación de negocio tiene cada cifra (una vaca que no pare es un año
-entero de coste de mantenimiento sin ingreso; un intervalo entre partos
-largo es menos terneros vendidos a lo largo de la vida productiva del mismo
-animal, con igual coste anual).
+    vista_bloque = (
+        f"VISTA ACTUAL DEL USUARIO EN EL PANEL (para preguntas ambiguas tipo "
+        f'"¿cómo vamos aquí?" o "y esto qué tal"): {view_context}.'
+    ) if view_context else ""
 
-DATOS POR COMUNIDAD AUTÓNOMA (año natural 2025):
-{df_ccaa.to_string(index=False)}
-
-DATOS POR PROVINCIA (año natural 2025):
-{df_prov.to_string(index=False)}
-
-ESTOS DOS BLOQUES DE DATOS SON TU ÚNICA FUENTE DE VERDAD, NO HAY NINGÚN OTRO
-DATO DISPONIBLE (ni municipios, ni ganaderías individuales, ni otros años, ni
-tasa de nacidos vivos, ni supervivencia al destete, ni peso al destete —
-esos otros KPI del embudo de productividad NO están en estos datos, así que
-si preguntan por ellos di explícitamente que no los tienes).
-
-Columnas:
-- indice_paricion_pct: % de nodrizas en edad reproductiva (≥18 meses) que
-  parieron en 2025. Más alto es mejor — es el mayor punto de fuga de
-  rentabilidad en cría extensiva, porque una vaca que no pare sigue comiendo
-  y ocupando pasto sin generar ningún ingreso ese año.
-- n_hembras: nº de nodrizas en edad reproductiva usadas como denominador.
-- intervalo_dias: días medios entre parto y parto consecutivo de la misma
-  vaca, para partos que cerraron en 2025. <365 = pare todos los años
-  (óptimo); 365-400 = aceptable; >400-420 = ya pierde terneros a lo largo de
-  su vida productiva con el mismo coste anual; >450-500 días o repetidora
-  crónica = candidata a descarte/venta, deja de compensar mantenerla.
-- pct_menos_365d: % de esos intervalos que fueron ≤365 días.
-- n_intervalos: nº de intervalos medidos (tamaño de muestra del intervalo).
-- NaN / vacío: sin dato fiable (muestra insuficiente) — no te lo inventes.
-
-Correlación (Pearson) entre índice de parición e intervalo entre partos a
-nivel CCAA: r = {corr_txt}.
-{filtro_bloque}
-{f"VISTA ACTUAL DEL USUARIO EN EL PANEL (para preguntas ambiguas tipo \"¿cómo vamos aquí?\" o \"y esto qué tal\"): {view_context}." if view_context else ""}
-
-REGLAS PARA RESPONDER (que no alucines es lo más importante):
-1. SOLO puedes usar los números de estos datos. Si te preguntan algo que no
-   está aquí (hectáreas, sanidad, pesos, sementales, municipios, otras
-   razas, otros años, nacidos vivos, supervivencia al destete...), responde
-   explícitamente "no tengo ese dato" en vez de estimar, inventar o
-   extrapolar un número que suene plausible.
-2. Nunca inventes una cifra decimal que no esté literalmente en los datos.
-   Si necesitas calcular algo (una diferencia, una media, un ratio), muestra
-   la cuenta con los números reales.
-3. Si el n de una región es muy bajo y la pregunta trata justo sobre ella,
-   menciónalo en una frase corta ("ojo, muestra pequeña, n=X"). El panel ya
-   avisa visualmente de las muestras pequeñas — no lo conviertas en un
-   párrafo aparte ni lo repitas si no es central para la respuesta.
-4. Cuando compares dos regiones, da los dos números exactos y la diferencia,
-   no solo una valoración cualitativa. Usa los datos por provincia si
-   preguntan por una provincia, o por comunidad autónoma si preguntan por
-   una CCAA — pero NUNCA dirijas al usuario a "la tabla 1" o "la tabla 2" ni
-   menciones esos nombres internos; habla de "los datos por comunidad
-   autónoma" o "por provincia" con naturalidad, como lo haría un consultor.
-4bis. IMPORTANTE — comparaciones con regiones sin dato: si te piden comparar
-   una región que NO aparece en los datos (ninguna fila, ni NaN — sencillamente
-   no existe: p.ej. Murcia, Ceuta, Melilla, Baleares, Canarias a nivel CCAA, o
-   cualquier provincia que no esté en el listado), NO inventes un número ni
-   la des por buena "sin dato". Dilo explícitamente: no se puede comparar
-   porque no hay ganaderías Limousin con datos en esa comunidad/provincia, así
-   que comparar contra otra sería injusto/sin base. Después ofrece una
-   alternativa: pregunta si quiere que sugieras tú una comparación con una
-   región similar que sí tenga dato (o sugiere una directamente si es obvia
-   por tamaño de muestra o cercanía geográfica), en vez de dejar la
-   conversación en un callejón sin salida.
-5. Explica en lenguaje llano y directo, sin jerga estadística innecesaria —
-   pero sin perder rigor técnico: cada análisis debe conectar el número con
-   su implicación de negocio (coste, rentabilidad, decisión sobre el
-   rebaño), no quedarse en "el valor es X".
-6. Si el usuario pregunta algo ambiguo sin nombrar una región concreta
-   (p.ej. "¿cómo vamos aquí?", "y esto qué tal", "analiza esto"), interpreta
-   que se refiere al SUBCONJUNTO FILTRADO o a la VISTA ACTUAL DEL PANEL
-   indicados arriba (si los hay), no a España entera.
-7. Cuando te pidan un análisis, sé HOLÍSTICO — no reportes una métrica sola
-   ni una región suelta, busca patrones y correlaciones en el conjunto:
-   a. RELACIONA índice de parición e intervalo entre partos entre sí, porque
-      diagnostican fallos DISTINTOS del mismo proceso: parición baja =
-      problema de fertilidad/cubrición inicial; intervalo largo con
-      parición aceptable = problema de reconcepción tras el parto
-      (nutrición posparto, sanidad, manejo). Dos regiones pueden tener el
-      mismo problema aparente por razones opuestas — señálalo cuando lo veas.
-   b. Usa la correlación (r) entre parición e intervalo ya calculada arriba
-      para hablar de la tendencia general, no solo de casos sueltos —
-      indica si es fuerte/débil y qué significa en la práctica.
-   c. Solo si es relevante para la pregunta: si el tamaño de muestra
-      explica claramente parte del patrón, apúntalo en una frase — no lo
-      conviertas en un desarrollo aparte por sistema, el panel ya avisa de
-      las muestras pequeñas visualmente.
-   d. Busca agrupaciones/outliers: ¿hay varias regiones parecidas que
-      podrían compartir causa común (p.ej. mismo rango de intervalo, mismo
-      nivel de parición) frente a una o dos que se salen claramente de la
-      norma?
-   e. Cierra siempre con qué le interesa a una ganadería de cría que busca
-      optimizar su operativa: dónde está el margen de mejora real, qué
-      patrón se repite entre regiones parecidas, y qué haría distinto una
-      explotación con esos números — no una lista de datos, una conclusión.
-8. Responde en español, tono directo de consultor, sin rodeos ni relleno.
-   SÉ BREVE SIEMPRE, sin excepción por defecto: 2-4 frases como máximo
-   (o 3-4 líneas si usas bullets), aunque la pregunta invite a un análisis
-   holístico — prioriza la conclusión más importante, no listes todos los
-   patrones posibles. No repitas el disclaimer de muestra pequeña si no es
-   el punto central de la respuesta. Solo alárgate si el usuario pide
-   explícitamente más detalle ("profundiza", "explícamelo mejor", "más
-   análisis", "no te cortes").
-9. Eres Limusin GPT, un agente especializado ÚNICAMENTE en producción de
-   ganadería cárnica y su productividad como negocio — no un chatbot
-   generalista. Si te preguntan algo ajeno a esta materia (temas
-   personales, otras industrias, opinión política, programar, o cualquier
-   petición sin relación con parición, intervalo entre partos, productividad
-   ganadera o los datos de este panel), no lo respondas: indica en una
-   frase que estás especializado solo en el análisis de estos datos
-   ganaderos y redirige la conversación hacia qué puedes analizar aquí.
-"""
+    template = _load_prompt_md("limusin_gpt_system_prompt.md")
+    return template.format(
+        df_ccaa=df_ccaa.to_string(index=False),
+        df_prov=df_prov.to_string(index=False),
+        corr_txt=corr_txt,
+        filtro_bloque=filtro_bloque,
+        vista_bloque=vista_bloque,
+    )
 
 
 # ---------------------------------------------------------------- freno de
@@ -903,6 +774,27 @@ def _llm_rate_gate() -> str | None:
         _LLM_STATE["last_call_ts"] = now
         times.append(now)
         return None
+
+
+def _current_model_tier() -> str:
+    """"small" o "large" según el modelo activo (AI_PROVIDER + GROQ_MODEL/
+    ANTHROPIC_MODEL) contra MODEL_TIERS — ver docs/prompts/README.md.
+    Cualquier modelo no listado cae en "small" (más prudente)."""
+    modelo = GROQ_MODEL if AI_PROVIDER == "groq" else ANTHROPIC_MODEL
+    return MODEL_TIERS.get(modelo, "small")
+
+
+@st.cache_data(show_spinner=False)
+def _load_prompt_md(filename: str) -> str:
+    """Lee un prompt de docs/prompts/ del disco (cacheado). Si el archivo no
+    existe (p.ej. un despliegue que no incluya docs/), usa un texto mínimo
+    de emergencia en vez de romper la app."""
+    path = os.path.join(PROMPTS_DIR, filename)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "Responde de forma breve, precisa y basada solo en los datos indicados arriba, sin inventar cifras."
 
 
 def call_llm(messages: list, view_context: str = "", filtered_table: str = "", temperature: float = 0.2) -> str:
@@ -1215,13 +1107,14 @@ with col_reco:
     with st.container(height=VIS_HEIGHT):
         # 3 bloques independientes — el usuario pidió expresamente que sea
         # la IA quien busque y decida (generate_ai_recommendations_v2), no
-        # solo que redacte hechos ya fijados. Restringido a nivel CCAA: en
-        # pruebas reales acertó 5/6 a nivel CCAA (11 filas) pero solo 1/3 a
-        # nivel provincia (39 filas) — llegó a inventar una provincia que ni
-        # está en los datos y a declarar "la más alta" una que no lo era. A
-        # nivel provincia se usa siempre el determinista, 100% fiable.
+        # solo que redacte hechos ya fijados. Con un modelo "small" (ver
+        # docs/prompts/README.md) se restringe a nivel CCAA: en pruebas
+        # reales acertó 5/6 a nivel CCAA (11 filas) pero solo 1/3 a nivel
+        # provincia (39 filas) — llegó a inventar una provincia que ni está
+        # en los datos. Con un modelo "large" no hace falta esa restricción.
+        ia_permitida = gran_key == "ccaa" or _current_model_tier() == "large"
         view_desc = f"{kpi_scope_label}; análisis mostrado: {cfg['label']}"
-        frases = generate_ai_recommendations_v2(gran_key, view_desc, offset=reco_angle) if gran_key == "ccaa" else None
+        frases = generate_ai_recommendations_v2(gran_key, view_desc, offset=reco_angle) if ia_permitida else None
         if not frases:
             facts = compute_reco_facts(gran_key, selected_keys, offset=reco_angle)
             frases = render_facts_deterministico(facts, gran_key)
