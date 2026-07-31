@@ -11,7 +11,28 @@ una versión distinta según qué tan capaz sea el modelo de IA activo.
 |---|---|---|
 | `limusin_gpt_system_prompt.md` | System prompt del chat "Limusin GPT" (persona, datos, reglas 1-9) | Cualquier modelo — no ha mostrado necesitar variantes por tier |
 | `recomendaciones_prompt_small_model.md` | Prompt del panel de Recomendaciones, con TODAS las guardas necesarias para un modelo pequeño | Modelos "small" (ver tabla de tiers abajo) |
-| `recomendaciones_prompt_large_model.md` | Misma tarea, sin las guardas específicas para limitaciones de modelo pequeño | Modelos "large" |
+| `recomendaciones_prompt_large_model.md` | Misma tarea, con persona de agente explícita, chequeo de coherencia mejor/peor, y búsqueda de relaciones interesantes (no solo comparación directa) | Modelos "large" |
+
+## Riesgo conocido y aceptado (2026-07-31)
+
+Con `llama-3.3-70b-versatile` (tier `large`) y el prompt ya con un "CHEQUEO
+DE COHERENCIA" explícito paso a paso (verificar la dirección correcta de
+la métrica antes de calificar un valor de "preocupante" o "bueno"), se
+probó de nuevo con Groq real: **el modelo siguió calificando el intervalo
+de Zamora (371 días — de los MEJORES del dataset) como "problema" que
+"necesita intervención más urgente"**, exactamente el mismo tipo de
+inversión mejor/peor que las guardas anteriores intentaban evitar.
+
+Van más de 6 rondas de ajuste de prompt dirigidas a este error concreto (ver
+[`../prompt_recomendaciones_panel.md`](../prompt_recomendaciones_panel.md)
+para el historial completo), con el modelo pequeño y con el grande, sin
+resolverlo del todo. Se le planteó esto al usuario explícitamente — decidió
+**mantener la IA como fuente principal de todos modos**, aceptando que
+puede seguir equivocándose ocasionalmente en qué región es mejor/peor. El
+fallback a `render_facts_deterministico()` (100% Python, nunca se ha
+equivocado en toda la sesión) sigue activo automáticamente si la IA no
+responde o el gate de contención bloquea — pero no sustituye una respuesta
+de la IA que tenga formato válido aunque el contenido sea incorrecto.
 
 ## Por qué dos versiones de "Recomendaciones" y no del chat
 
