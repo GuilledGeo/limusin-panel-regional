@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.request
 
 import pandas as pd
@@ -841,21 +842,35 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "", t
                 {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
                 for m in messages
             ]
-            response = client.models.generate_content(
-                model=GEMINI_MODEL, contents=gemini_contents,
-                config=types.GenerateContentConfig(
-                    # Los modelos Gemini recientes (3.6) gastan una parte
-                    # GRANDE del presupuesto de tokens en "pensamiento"
-                    # interno antes de la respuesta visible — en pruebas
-                    # reales, ~2200 tokens de pensamiento para el prompt de
-                    # Recomendaciones. Con 350-1000 (lo que basta para
-                    # Groq/Anthropic, que no "piensan") la respuesta salía
-                    # vacía o cortada a media frase. 4000 da margen de
-                    # sobra para pensamiento + la respuesta completa.
-                    system_instruction=system_prompt, temperature=temperature, max_output_tokens=4000,
-                ),
+            gemini_config = types.GenerateContentConfig(
+                # Los modelos Gemini recientes (3.6) gastan una parte
+                # GRANDE del presupuesto de tokens en "pensamiento" interno
+                # antes de la respuesta visible — en pruebas reales, ~2200
+                # tokens de pensamiento para el prompt de Recomendaciones.
+                # Con 350-1000 (lo que basta para Groq/Anthropic, que no
+                # "piensan") la respuesta salía vacía o cortada a media
+                # frase. 4000 da margen de sobra para pensamiento + la
+                # respuesta completa.
+                system_instruction=system_prompt, temperature=temperature, max_output_tokens=4000,
             )
-            return response.text or "⚠️ La IA no devolvió texto (respuesta vacía). Prueba de nuevo."
+            # Reintento único ante un fallo transitorio (429 = cuota por
+            # minuto del proyecto; 500/503 = error momentáneo de los
+            # servidores de Google, visto en pruebas reales) antes de
+            # rendirse — un pico puntual no debería tumbar la respuesta a
+            # la primera.
+            for intento in range(2):
+                try:
+                    response = client.models.generate_content(
+                        model=GEMINI_MODEL, contents=gemini_contents, config=gemini_config,
+                    )
+                    return response.text or "⚠️ La IA no devolvió texto (respuesta vacía). Prueba de nuevo."
+                except Exception as e:
+                    err_txt = str(e)
+                    es_transitorio = any(code in err_txt for code in ("429", "RESOURCE_EXHAUSTED", "500", "503", "INTERNAL", "UNAVAILABLE"))
+                    if intento == 0 and es_transitorio:
+                        time.sleep(2)
+                        continue
+                    raise
         return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
     except Exception as e:
         err_name = type(e).__name__
