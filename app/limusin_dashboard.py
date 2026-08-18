@@ -48,6 +48,8 @@ MODEL_TIERS = {
     "claude-sonnet-4-6": "large",
     "gemini-2.5-flash": "large",
     "gemini-2.5-pro": "large",
+    "gemini-3.6-flash": "large",
+    "gemini-3.6-pro": "large",
 }
 CCAA_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-communities.geojson"
 PROV_GEOJSON_URL = "https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/spain-provinces.geojson"
@@ -854,10 +856,18 @@ def call_llm(messages: list, view_context: str = "", filtered_table: str = "", t
             response = client.models.generate_content(
                 model=GEMINI_MODEL, contents=gemini_contents,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_prompt, temperature=temperature, max_output_tokens=350,
+                    # Los modelos Gemini recientes (3.6) gastan una parte
+                    # GRANDE del presupuesto de tokens en "pensamiento"
+                    # interno antes de la respuesta visible — en pruebas
+                    # reales, ~2200 tokens de pensamiento para el prompt de
+                    # Recomendaciones. Con 350-1000 (lo que basta para
+                    # Groq/Anthropic, que no "piensan") la respuesta salía
+                    # vacía o cortada a media frase. 4000 da margen de
+                    # sobra para pensamiento + la respuesta completa.
+                    system_instruction=system_prompt, temperature=temperature, max_output_tokens=4000,
                 ),
             )
-            return response.text
+            return response.text or "⚠️ La IA no devolvió texto (respuesta vacía). Prueba de nuevo."
         return f"⚠️ AI_PROVIDER desconocido: {AI_PROVIDER!r}"
     except Exception as e:
         err_name = type(e).__name__
