@@ -36,14 +36,39 @@ de la IA que tenga formato válido aunque el contenido sea incorrecto.
 
 ## Proveedores soportados
 
-`AI_PROVIDER` en `.env`/Secrets puede ser `"groq"` (gratis, el que se usa
-hoy), `"gemini"` (Google AI Studio, cuenta de empresa con acceso de pago —
-añadido 2026-07-31, ver `GEMINI_API_KEY`/`GEMINI_MODEL` en
-`config/settings.py`) o `"anthropic"` (Claude, objetivo de producción
-original). Cambiar de proveedor es tan simple como cambiar `AI_PROVIDER` y
-la clave correspondiente — `call_llm()` en `limusin_dashboard.py` tiene una
-rama por proveedor, y `_current_model_tier()`/`MODEL_TIERS` deciden solos
-qué prompt usar según el modelo activo, sea cual sea el proveedor.
+`AI_PROVIDER` en `.env`/Secrets puede ser `"gemini"` (Google AI Studio,
+cuenta de empresa con acceso de pago — **por defecto desde 2026-08-18**,
+ver más abajo por qué), `"groq"` (gratis, queda como alternativa de
+respaldo) o `"anthropic"` (Claude, objetivo de producción original).
+Cambiar de proveedor es tan simple como cambiar `AI_PROVIDER` y la clave
+correspondiente — `call_llm()` en `limusin_dashboard.py` tiene una rama por
+proveedor, y `_current_model_tier()`/`MODEL_TIERS` deciden solos qué prompt
+usar según el modelo activo, sea cual sea el proveedor.
+
+### Gemini es el proveedor activo por defecto (2026-08-18)
+
+Probado con `gemini-3.6-flash` (clave real de Google AI Studio, cuenta de
+empresa) contra los mismos casos que fallaban sistemáticamente con Groq
+(incluido el caso Zamora del apartado de riesgo aceptado, arriba) — **100%
+correcto en las pruebas**, tanto en el chat como en las Recomendaciones, a
+nivel CCAA y a nivel provincia. Interpretó bien incluso `pct_menos_365d`,
+la columna que Groq llevaba confundiendo toda la sesión.
+
+**Detalle importante para no repetir el error**: los modelos Gemini 3.6
+gastan una parte GRANDE del presupuesto de tokens en "pensamiento" interno
+antes de la respuesta visible (~2200 tokens de pensamiento solo para el
+prompt de Recomendaciones, medido con `usage_metadata.thoughts_token_count`
+en pruebas reales). Con el `max_output_tokens=350` que basta para
+Groq/Anthropic (que no "piensan"), la respuesta de Gemini salía vacía o
+cortada a media frase. La rama `gemini` de `call_llm()` usa
+`max_output_tokens=4000` específicamente por esto — si se toca ese valor,
+verificar primero con `r.usage_metadata` cuánto gasta realmente el modelo
+en pensamiento antes de bajarlo.
+
+Dado que es un recurso de pago (a diferencia de la cuota gratuita de
+Groq), si el uso escala conviene vigilar el coste — los gates de
+contención (`_llm_rate_gate`) siguen aplicando igual, protegen tanto la
+cuota como el gasto.
 
 ## Por qué dos versiones de "Recomendaciones" y no del chat
 
