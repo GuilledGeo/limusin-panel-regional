@@ -14,7 +14,6 @@ import os
 import re
 import sys
 import threading
-import time
 import urllib.request
 
 import pandas as pd
@@ -746,36 +745,25 @@ entera:
 
 
 # ---------------------------------------------------------------- freno de
-# peticiones a la IA: gates propios, independientes del rate limit real de
-# Groq/Anthropic, para no gastar la cuota gratuita en ráfagas (varios
-# visitantes a la vez, o clics repetidos en "🔄 Refrescar"). Estado a nivel
-# de módulo (no de sesión) porque en Streamlit Cloud todas las sesiones de
-# un mismo despliegue comparten el mismo proceso Python — el freno protege
-# la cuota real, compartida por todos los visitantes.
+# peticiones a la IA: existió como gate propio (5s entre peticiones, 10/min)
+# para proteger la cuota GRATUITA de Groq de ráfagas. Desactivado desde que
+# Gemini es el proveedor por defecto (2026-08-18) — resultaba demasiado
+# restrictivo para uso normal en Streamlit Cloud en vivo, y Gemini es un
+# recurso de pago con su propio rate limit en servidor (que call_llm ya
+# captura y convierte en aviso legible vía el try/except de más abajo). Se
+# deja la infraestructura (lock/estado/constantes) por si hiciera falta
+# reactivar un límite de gasto en el futuro — basta con hacer que
+# _llm_rate_gate() vuelva a evaluar las condiciones en vez de retornar None.
 _LLM_LOCK = threading.Lock()
 _LLM_STATE = {"last_call_ts": 0.0, "call_times": []}
-LLM_MIN_INTERVAL_SECONDS = 5   # espera mínima entre dos peticiones cualquiera
-LLM_MAX_CALLS_PER_MINUTE = 10  # tope adicional en ráfaga
+LLM_MIN_INTERVAL_SECONDS = 5   # sin efecto mientras _llm_rate_gate esté desactivado
+LLM_MAX_CALLS_PER_MINUTE = 10  # sin efecto mientras _llm_rate_gate esté desactivado
 
 
 def _llm_rate_gate() -> str | None:
-    """None si se puede proceder; si no, un mensaje de aviso ya listo para
-    mostrar en vez de la respuesta de la IA."""
-    now = time.time()
-    with _LLM_LOCK:
-        elapsed = now - _LLM_STATE["last_call_ts"]
-        if elapsed < LLM_MIN_INTERVAL_SECONDS:
-            wait = LLM_MIN_INTERVAL_SECONDS - elapsed
-            return f"⏳ Espera {wait:.0f}s antes de la siguiente pregunta — protege la cuota gratuita de la IA."
-        times = _LLM_STATE["call_times"]
-        while times and now - times[0] > 60:
-            times.pop(0)
-        if len(times) >= LLM_MAX_CALLS_PER_MINUTE:
-            return (f"⚠️ Demasiadas peticiones a la IA en el último minuto (límite propio de "
-                     f"{LLM_MAX_CALLS_PER_MINUTE}/min para cuidar la cuota gratuita). Espera un poco.")
-        _LLM_STATE["last_call_ts"] = now
-        times.append(now)
-        return None
+    """Desactivado — ver comentario de arriba. Devuelve siempre None (vía
+    libre) en vez de bloquear peticiones."""
+    return None
 
 
 def _current_model_tier() -> str:
